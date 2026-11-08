@@ -4,6 +4,12 @@ Analizador de almacenamiento y desinstalador a fondo para Windows 10/11, con int
 
 **Versión actual:** 1.1.0
 
+## ⬇️ Descargar
+
+[![Descargar DiskPilot.exe](https://img.shields.io/badge/Descargar-DiskPilot.exe-7C5CFF?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Cordobot/DiskPilot/releases/latest/download/DiskPilot.exe)
+
+**[👉 Descargar DiskPilot.exe (Windows 10/11)](https://github.com/Cordobot/DiskPilot/releases/latest/download/DiskPilot.exe)** · [Ver todas las versiones](https://github.com/Cordobot/DiskPilot/releases)
+
 ## Funciones
 
 - **Resumen** — uso de cada unidad, programas que más ocupan y archivos más grandes (+200 MB).
