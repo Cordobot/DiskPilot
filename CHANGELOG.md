@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0] - 2026-11-08
+
+### Añadido
+- Ejecutable nativo `DiskPilot.exe` con icono propio, información de versión y elevación automática a administrador (UAC).
+- Script `build/build.ps1` para compilar el ejecutable sin herramientas externas.
+- La versión se muestra en la barra lateral y en el título de la ventana.
+
 ## [1.0.0] - 2026-11-08
 
 ### Añadido

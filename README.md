@@ -2,7 +2,7 @@
 
 Analizador de almacenamiento y desinstalador a fondo para Windows 10/11, con interfaz moderna en modo oscuro.
 
-**Versión actual:** 1.0.0
+**Versión actual:** 1.1.0
 
 ## Funciones
 
@@ -26,9 +26,17 @@ Nunca se borran: la carpeta de Windows, raíces de *Archivos de programa*, *Prog
 
 ## Uso
 
-1. Descarga el repositorio (o el `.zip` de la última *release*).
-2. Doble clic en **`Iniciar DiskPilot.bat`**.
-3. Acepta el aviso de Control de cuentas de usuario (UAC) para darle permisos de administrador.
+### Opción 1 — Ejecutable (recomendado)
+
+1. Descarga **`DiskPilot.exe`** desde la [última release](https://github.com/Cordobot/DiskPilot/releases/latest).
+2. Ábrelo con doble clic y acepta el aviso de administrador (UAC).
+
+> Al no estar firmado digitalmente, Windows SmartScreen puede mostrar «Windows protegió tu PC». Pulsa **Más información → Ejecutar de todas formas**.
+
+### Opción 2 — Script
+
+1. Descarga el repositorio (o el `.zip` de la release).
+2. Doble clic en **`Iniciar DiskPilot.bat`** y acepta el aviso de UAC.
 
 No requiere instalación: usa PowerShell 5.1 y .NET Framework, incluidos en Windows.
 
@@ -39,10 +47,21 @@ powershell -ExecutionPolicy Bypass -File DiskPilot.ps1 -NoElevate   # abrir sin 
 powershell -ExecutionPolicy Bypass -File DiskPilot.ps1 -SelfTest    # prueba rápida del motor sin interfaz
 ```
 
+## Compilar el .exe
+
+No necesita Visual Studio: usa el compilador de C# que trae Windows.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build\build.ps1
+```
+
+Genera `dist\DiskPilot.exe` con el script incrustado, icono propio y manifiesto que pide administrador. La versión se toma de `$AppVersion` en `DiskPilot.ps1`.
+
 ## Estructura
 
 | Archivo | Descripción |
 |---|---|
 | `DiskPilot.ps1` | Aplicación completa: motor en C# (compilado al vuelo) + interfaz WPF |
-| `Iniciar DiskPilot.bat` | Lanzador con doble clic |
+| `Iniciar DiskPilot.bat` | Lanzador con doble clic (sin compilar) |
+| `build/` | Lanzador nativo en C#, manifiesto y script de compilación del `.exe` |
 | `CHANGELOG.md` | Historial de versiones |

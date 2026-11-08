@@ -1,5 +1,5 @@
 ﻿# =====================================================================
-#  DiskPilot v1.0.0 - Analizador de disco y desinstalador a fondo para Windows
+#  DiskPilot v1.1.0 - Analizador de disco y desinstalador a fondo para Windows
 #  Requiere: Windows 10/11 con PowerShell 5.1 (incluido en Windows)
 # =====================================================================
 param(
@@ -8,7 +8,7 @@ param(
     [string]$Screenshot
 )
 $ErrorActionPreference = 'Continue'
-$AppVersion = '1.0.0'
+$AppVersion = '1.1.0'
 
 # ---------- Elevación a administrador ----------
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
