@@ -3,3 +3,4 @@
 Thumbs.db
 dist/
 build/obj/
+!assets/*.png
