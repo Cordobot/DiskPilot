@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.5.0] - 2026-11-08
+
+### Añadido
+- Logo propio de DiskPilot (anillo de uso de disco sobre degradado violeta-cian) en el `.exe`, la ventana, la barra de tareas, la barra lateral y los accesos directos.
+- La ventana tiene identidad propia en la barra de tareas y ya no se agrupa ni se muestra como PowerShell.
+
 ## [1.4.0] - 2026-11-08
 
 ### Añadido

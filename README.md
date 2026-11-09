@@ -1,8 +1,10 @@
-# DiskPilot
+<p align="center"><img src="assets/logo.png" width="120" alt="DiskPilot"></p>
+
+<h1 align="center">DiskPilot</h1>
 
 Analizador de almacenamiento y desinstalador a fondo para Windows 10/11, con interfaz moderna en modo oscuro.
 
-**Versión actual:** 1.4.0
+**Versión actual:** 1.5.0
 
 ## ⬇️ Descargar
 
@@ -77,5 +79,6 @@ Genera `dist\DiskPilot.exe` con el script incrustado, icono propio y manifiesto 
 |---|---|
 | `DiskPilot.ps1` | Aplicación completa: motor en C# (compilado al vuelo) + interfaz WPF |
 | `Iniciar DiskPilot.bat` | Lanzador con doble clic (sin compilar) |
-| `build/` | Lanzador nativo en C#, manifiesto y script de compilación del `.exe` |
+| `build/` | Lanzador nativo en C#, manifiesto, generador del logo y script de compilación del `.exe` |
+| `assets/` | Logo (`logo.png`) e icono (`DiskPilot.ico`) |
 | `CHANGELOG.md` | Historial de versiones |

@@ -12,41 +12,9 @@ $version = ([regex]::Match((Get-Content $script -Raw -Encoding UTF8), "\`$AppVer
 if (-not $version) { throw 'No se encontró $AppVersion en DiskPilot.ps1' }
 Write-Host "Versión: $version"
 
-# ---------- Icono (degradado violeta-cian con un disco) ----------
-Add-Type -AssemblyName System.Drawing
-function New-IconPng([int]$s) {
-    $bmp = New-Object System.Drawing.Bitmap $s, $s
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = 'AntiAlias'; $g.TextRenderingHint = 'AntiAliasGridFit'
-    $r = [Math]::Max(2, [int]($s * 0.22)); $d = $r * 2
-    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-    $path.AddArc(0, 0, $d, $d, 180, 90); $path.AddArc($s - $d - 1, 0, $d, $d, 270, 90)
-    $path.AddArc($s - $d - 1, $s - $d - 1, $d, $d, 0, 90); $path.AddArc(0, $s - $d - 1, $d, $d, 90, 90); $path.CloseFigure()
-    $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush((New-Object System.Drawing.Point 0, 0), (New-Object System.Drawing.Point $s, $s),
-        [System.Drawing.Color]::FromArgb(124, 92, 255), [System.Drawing.Color]::FromArgb(0, 194, 255))
-    $g.FillPath($brush, $path)
-    $font = New-Object System.Drawing.Font('Segoe MDL2 Assets', [single]($s * 0.5), [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
-    $sf = New-Object System.Drawing.StringFormat; $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'
-    $g.DrawString([string][char]0xEDA2, $font, [System.Drawing.Brushes]::White, (New-Object System.Drawing.RectangleF 0, ([single]($s * 0.04)), $s, $s), $sf)
-    $g.Dispose()
-    $ms = New-Object System.IO.MemoryStream
-    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
-    return , $ms.ToArray()
-}
-$sizes = 16, 24, 32, 48, 64, 128, 256
-$pngs = foreach ($s in $sizes) { , (New-IconPng $s) }
-$ico = Join-Path $obj 'DiskPilot.ico'
-$fs = [IO.File]::Create($ico); $bw = New-Object IO.BinaryWriter $fs
-$bw.Write([uint16]0); $bw.Write([uint16]1); $bw.Write([uint16]$sizes.Count)
-$offset = 6 + 16 * $sizes.Count
-for ($i = 0; $i -lt $sizes.Count; $i++) {
-    $s = $sizes[$i]; $len = $pngs[$i].Length
-    $bw.Write([byte]($s % 256)); $bw.Write([byte]($s % 256)); $bw.Write([byte]0); $bw.Write([byte]0)
-    $bw.Write([uint16]1); $bw.Write([uint16]32); $bw.Write([uint32]$len); $bw.Write([uint32]$offset)
-    $offset += $len
-}
-foreach ($p in $pngs) { $bw.Write($p) }
-$bw.Close()
+# ---------- Logo e icono (también lo incrusta en DiskPilot.ps1) ----------
+& (Join-Path $here 'make-logo.ps1')
+$ico = Join-Path $root 'assets\DiskPilot.ico'
 
 # ---------- Compilación ----------
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'

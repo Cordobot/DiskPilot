@@ -1,5 +1,5 @@
 ﻿# =====================================================================
-#  DiskPilot v1.4.0 - Analizador de disco y desinstalador a fondo para Windows
+#  DiskPilot v1.5.0 - Analizador de disco y desinstalador a fondo para Windows
 #  Requiere: Windows 10/11 con PowerShell 5.1 (incluido en Windows)
 # =====================================================================
 param(
@@ -9,7 +9,10 @@ param(
     [string]$TestCategory
 )
 $ErrorActionPreference = 'Continue'
-$AppVersion = '1.4.0'
+$AppVersion = '1.5.0'
+# @@LOGO_BEGIN (generado por build\make-logo.ps1)
+$LogoPng = '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'
+# @@LOGO_END
 
 # ---------- Elevación a administrador ----------
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -64,6 +67,10 @@ namespace DiskPilot
     {
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int a, ref int v, int s);
         public static void DarkTitle(IntPtr h) { try { int v = 1; DwmSetWindowAttribute(h, 20, ref v, 4); } catch { } }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        static extern int SetCurrentProcessExplicitAppUserModelID(string id);
+        public static void SetAppId(string id) { try { SetCurrentProcessExplicitAppUserModelID(id); } catch { } }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern bool MoveFileEx(string a, string b, int flags);
@@ -1802,6 +1809,19 @@ namespace DiskPilot
 if (-not ('DiskPilot.Scanner' -as [type])) {
     Add-Type -TypeDefinition $cs -Language CSharp -ReferencedAssemblies System.Drawing
 }
+[DiskPilot.Native]::SetAppId('Cordobot.DiskPilot')
+
+function Get-LogoImage {
+    if (-not $LogoPng) { return $null }
+    try {
+        $bytes = [Convert]::FromBase64String($LogoPng)
+        $ms = New-Object System.IO.MemoryStream(, $bytes)
+        $bi = New-Object System.Windows.Media.Imaging.BitmapImage
+        $bi.BeginInit(); $bi.CacheOption = 'OnLoad'; $bi.StreamSource = $ms; $bi.EndInit(); $bi.Freeze()
+        return $bi
+    }
+    catch { return $null }
+}
 
 # =====================================================================
 #  Interfaz (XAML)
@@ -2100,9 +2120,7 @@ $xaml = @'
       <Grid Margin="16,22,16,18">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel Orientation="Horizontal" Margin="6,0,0,30">
-          <Border Width="40" Height="40" CornerRadius="12" Background="{StaticResource Accent}">
-            <TextBlock Text="&#xEDA2;" FontFamily="Segoe MDL2 Assets" FontSize="20" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-          </Border>
+          <Image x:Name="SideLogo" Width="40" Height="40" RenderOptions.BitmapScalingMode="HighQuality"/>
           <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
             <TextBlock Text="DiskPilot" FontSize="19" FontWeight="Bold" Foreground="White"/>
             <TextBlock x:Name="VersionText" Text="Control de almacenamiento" FontSize="11" Foreground="#8B92A6"/>
@@ -3602,6 +3620,8 @@ $window.Add_SourceInitialized({
 $window.Add_Closing({ [DiskPilot.Scanner]::Cancel = $true; $timer.Stop() })
 
 # ---------- Arranque ----------
+$script:Logo = Get-LogoImage
+if ($script:Logo) { $window.Icon = $script:Logo; $SideLogo.Source = $script:Logo }
 $VersionText.Text = "Versión $AppVersion"
 $window.Title = "DiskPilot v$AppVersion — Almacenamiento y desinstalación a fondo"
 if (-not $IsAdmin) {
