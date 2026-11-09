@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.0] - 2026-11-08
+
+### Añadido
+- Las categorías de la gráfica se pueden pulsar: muestran las carpetas y archivos concretos que las forman (las carpetas dominantes se abren automáticamente), con opciones para abrir, ver el contenido o eliminar.
+- Si la unidad no está analizada, al pulsar una categoría se analiza y se abre el detalle al terminar.
+- «No visible» muestra el espacio reservado para puntos de restauración (vssadmin) y abre Protección del sistema.
+
+### Corregido
+- La gráfica completa no aparecía tras analizar una unidad grande (desbordamiento numérico).
+
 ## [1.2.0] - 2026-11-08
 
 ### Añadido

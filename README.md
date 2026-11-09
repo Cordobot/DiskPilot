@@ -2,7 +2,7 @@
 
 Analizador de almacenamiento y desinstalador a fondo para Windows 10/11, con interfaz moderna en modo oscuro.
 
-**Versión actual:** 1.2.0
+**Versión actual:** 1.3.0
 
 ## ⬇️ Descargar
 
@@ -12,7 +12,7 @@ Analizador de almacenamiento y desinstalador a fondo para Windows 10/11, con int
 
 ## Funciones
 
-- **Resumen** — gráfica por categorías de cada unidad (Juegos, Programas, Sistema, Datos de apps, Archivos personales, Temporales, Otros, Libre), programas que más ocupan y archivos más grandes (+200 MB).
+- **Resumen** — gráfica por categorías de cada unidad (Juegos, Programas, Sistema, Datos de apps, Archivos personales, Temporales, Otros, Libre), programas que más ocupan y archivos más grandes (+200 MB). **Haz clic en cualquier categoría** (por ejemplo «Otros») para ver exactamente qué carpetas y archivos la forman y poder abrirlos o borrarlos.
 - **Programas** — todos los programas instalados con su icono, ordenados por el tamaño real de su carpeta, con búsqueda y orden por nombre o fecha. Marca varias casillas para desinstalarlos de una vez.
 - **Desinstalar a fondo** (con permisos de administrador):
   1. Ejecuta el desinstalador oficial (en modo silencioso cuando el programa lo admite: MSI, Inno Setup, NSIS, Squirrel).

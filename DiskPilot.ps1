@@ -1,14 +1,15 @@
 ﻿# =====================================================================
-#  DiskPilot v1.2.0 - Analizador de disco y desinstalador a fondo para Windows
+#  DiskPilot v1.3.0 - Analizador de disco y desinstalador a fondo para Windows
 #  Requiere: Windows 10/11 con PowerShell 5.1 (incluido en Windows)
 # =====================================================================
 param(
     [switch]$NoElevate,
     [switch]$SelfTest,
-    [string]$Screenshot
+    [string]$Screenshot,
+    [string]$TestCategory
 )
 $ErrorActionPreference = 'Continue'
-$AppVersion = '1.2.0'
+$AppVersion = '1.3.0'
 
 # ---------- Elevación a administrador ----------
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -397,7 +398,7 @@ namespace DiskPilot
         public static void Remove(DiskItem it)
         {
             DirNode owner = it.Owner; if (owner == null) return;
-            long s = it.Size;
+            long s = (it.Kind == "dir" && it.Node != null) ? it.Node.Size : it.Size;
             if (it.Kind == "dir") owner.Dirs.Remove(it.Node);
             else if (it.Kind == "file") owner.BigFiles.RemoveAll(x => x.Key == it.Name);
             else return;
@@ -417,6 +418,17 @@ namespace DiskPilot
         public double Percent { get; set; }
         public double W { get; set; }
         public string Tip { get; set; }
+        public int Cat { get; set; }
+        public string Root { get; set; }
+    }
+
+    public class Breakdown
+    {
+        public DirNode Root;
+        public List<Segment> Segments;
+        public long[] Totals;
+        public Dictionary<DirNode, int> Cat = new Dictionary<DirNode, int>();
+        public Dictionary<DirNode, long> Attr = new Dictionary<DirNode, long>();
     }
 
     public static class Categorizer
@@ -451,7 +463,7 @@ namespace DiskPilot
             {
                 if (acc[i] <= 0) continue;
                 var s = new Segment();
-                s.Name = Names[i]; s.Color = Colors[i]; s.Size = acc[i]; s.SizeText = Fmt.Size(acc[i]);
+                s.Name = Names[i]; s.Cat = i; s.Color = Colors[i]; s.Size = acc[i]; s.SizeText = Fmt.Size(acc[i]);
                 s.Percent = acc[i] * 100.0 / t;
                 s.Tip = s.Name + ": " + s.SizeText + " (" + s.Percent.ToString("0.#") + "%)";
                 l.Add(s);
@@ -488,7 +500,9 @@ namespace DiskPilot
             }
             acc[6] = Math.Max(0, d.Used - acc[0] - acc[1]);
             acc[8] = d.Free;
-            return Build(acc, d.Total);
+            var q = Build(acc, d.Total);
+            foreach (var s in q) s.Root = d.Root;
+            return q;
         }
 
         static int Match(DirNode n, Dictionary<string, int> pd, int depth)
@@ -514,23 +528,36 @@ namespace DiskPilot
             return -1;
         }
 
-        static void Visit(DirNode n, int cat, int depth, long[] acc, Dictionary<string, int> pd)
+        static bool IsSys(string fn)
+        {
+            fn = fn.ToLowerInvariant();
+            return fn == "pagefile.sys" || fn == "hiberfil.sys" || fn == "swapfile.sys" || fn == "memory.dmp";
+        }
+
+        // Asigna categoría a cada carpeta y calcula cuánto aporta a su categoría (sin contar subcarpetas de otra categoría)
+        static long Visit(DirNode n, int cat, int depth, long[] acc, Dictionary<string, int> pd, Breakdown b)
         {
             if (depth > 0) { int m = Match(n, pd, depth); if (m >= 0) cat = m; }
-            long sub = 0;
-            foreach (var c in n.Dirs) { Visit(c, cat, depth + 1, acc, pd); sub += c.Size; }
+            b.Cat[n] = cat;
+            long sub = 0, same = 0;
+            foreach (var c in n.Dirs)
+            {
+                long a = Visit(c, cat, depth + 1, acc, pd, b);
+                sub += c.Size;
+                if (b.Cat[c] == cat) same += a;
+            }
             long own = n.Size - sub;
             if (depth == 0)
                 foreach (var f in n.BigFiles)
-                {
-                    string fn = f.Key.ToLowerInvariant();
-                    if (fn == "pagefile.sys" || fn == "hiberfil.sys" || fn == "swapfile.sys" || fn == "memory.dmp") { acc[2] += f.Value; own -= f.Value; }
-                }
-            acc[cat] += Math.Max(0, own);
+                    if (IsSys(f.Key)) { acc[2] += f.Value; own -= f.Value; }
+            own = Math.Max(0, own);
+            acc[cat] += own;
+            long attr = own + same;
+            b.Attr[n] = attr;
+            return attr;
         }
 
-        // Desglose completo tras analizar una unidad
-        public static List<Segment> Classify(DirNode root, long total, long free, List<ProgramInfo> progs)
+        public static Breakdown Analyze(DirNode root, long total, long free, List<ProgramInfo> progs)
         {
             var pd = new Dictionary<string, int>();
             if (progs != null)
@@ -540,11 +567,91 @@ namespace DiskPilot
                     string k = p.InstallDir.ToLowerInvariant().TrimEnd('\\');
                     if (!pd.ContainsKey(k)) pd[k] = IsGame(p) ? 0 : 1;
                 }
+            var b = new Breakdown(); b.Root = root;
             var acc = new long[9];
-            Visit(root, 6, 0, acc, pd);
+            Visit(root, 6, 0, acc, pd, b);
             acc[7] = Math.Max(0, (total - free) - root.Size);
             acc[8] = free;
-            return Build(acc, total);
+            b.Totals = acc;
+            b.Segments = Build(acc, total);
+            foreach (var s in b.Segments) s.Root = root.Path;
+            return b;
+        }
+
+        // Desglose completo tras analizar una unidad
+        public static List<Segment> Classify(DirNode root, long total, long free, List<ProgramInfo> progs)
+        {
+            return Analyze(root, total, free, progs).Segments;
+        }
+
+        static DiskItem Item(string name, string full, long size, double t, string kind, string icon, string detail, DirNode node, DirNode owner)
+        {
+            var d = new DiskItem();
+            d.Name = name; d.FullPath = full; d.Size = size; d.SizeText = Fmt.Size(size);
+            d.Percent = size * 100.0 / t;
+            d.PercentText = d.Percent < 0.1 ? "<0.1%" : d.Percent.ToString("0.0") + "%";
+            d.Kind = kind; d.Icon = icon; d.Detail = detail; d.Node = node; d.Owner = owner;
+            return d;
+        }
+
+        static DiskItem DirItem(DirNode n, Breakdown b, double t)
+        {
+            long a = b.Attr[n];
+            string where = n.Parent == null ? "Raíz de la unidad" : "En " + n.Parent.Path;
+            string extra = n.Size > a + (1L << 20) ? "   ·   la carpeta completa ocupa " + Fmt.Size(n.Size) : "";
+            return Item(n.Parent == null ? n.Path : n.Name, n.Path, a, t, "dir", "", where + extra, n, n.Parent);
+        }
+
+        static List<DiskItem> Expand(DirNode node, Breakdown b, int cat, double t)
+        {
+            var l = new List<DiskItem>();
+            foreach (var c in node.Dirs) if (b.Cat[c] == cat && b.Attr[c] > 0) l.Add(DirItem(c, b, t));
+            long own = node.Size; foreach (var c in node.Dirs) own -= c.Size;
+            bool root = node.Parent == null;
+            string pfx = node.Path.TrimEnd('\\') + "\\";
+            long big = 0;
+            foreach (var f in node.BigFiles)
+            {
+                if (root && IsSys(f.Key)) { own -= f.Value; continue; }
+                l.Add(Item(f.Key, pfx + f.Key, f.Value, t, "file", "", "Archivo en " + node.Path, null, node));
+                big += f.Value;
+            }
+            long small = own - big;
+            if (small > (1L << 20) && node.SmallCount > 0)
+                l.Add(Item(node.SmallCount.ToString("N0") + " archivos pequeños sueltos", node.Path, small, t, "small", "", "En " + node.Path, node, node));
+            return l;
+        }
+
+        // Carpetas y archivos concretos que forman una categoría (las carpetas dominantes se abren automáticamente)
+        public static List<DiskItem> Items(Breakdown b, int cat, int max)
+        {
+            double t = Math.Max(1, (b.Totals != null && cat < b.Totals.Length) ? b.Totals[cat] : 1);
+            var work = new List<DiskItem>();
+            var st = new Stack<DirNode>(); st.Push(b.Root);
+            while (st.Count > 0)
+            {
+                var n = st.Pop();
+                int c; if (!b.Cat.TryGetValue(n, out c)) continue;
+                if (c == cat && (n.Parent == null || b.Cat[n.Parent] != cat) && b.Attr[n] > 0) work.Add(DirItem(n, b, t));
+                foreach (var ch in n.Dirs) st.Push(ch);
+            }
+            if (cat == 2)
+                foreach (var f in b.Root.BigFiles)
+                    if (IsSys(f.Key)) work.Add(Item(f.Key, b.Root.Path.TrimEnd('\\') + "\\" + f.Key, f.Value, t, "file", "", "Archivo del sistema en la raíz", null, b.Root));
+
+            for (int iter = 0; iter < 12; iter++)
+            {
+                DiskItem top = null;
+                foreach (var it in work) if (it.Kind == "dir" && (top == null || it.Size > top.Size)) top = it;
+                if (top == null || top.Size < t * 0.30) break;
+                var ex = Expand(top.Node, b, cat, t);
+                bool anyDir = false; foreach (var e in ex) if (e.Kind == "dir" || e.Kind == "file") anyDir = true;
+                if (!anyDir) break;
+                work.Remove(top); work.AddRange(ex);
+            }
+            work.Sort((x, y) => y.Size.CompareTo(x.Size));
+            if (work.Count > max) work.RemoveRange(max, work.Count - max);
+            return work;
         }
     }
 
@@ -1756,6 +1863,36 @@ $xaml = @'
       <Setter Property="FontSize" Value="12"/>
     </Style>
 
+    <Style x:Key="Chip" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Foreground" Value="#E8EAF0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="Transparent" CornerRadius="6" Padding="5,2">
+              <ContentPresenter/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Background" Value="#262E42"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="BarSeg" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd" Background="{TemplateBinding Background}"/>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="bd" Property="Opacity" Value="0.75"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <Style x:Key="Nav" TargetType="RadioButton">
       <Setter Property="Foreground" Value="#8B92A6"/>
       <Setter Property="FontSize" Value="14"/>
@@ -2029,7 +2166,7 @@ $xaml = @'
                     <ItemsControl ItemsSource="{Binding Segments}">
                       <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                       <ItemsControl.ItemTemplate>
-                        <DataTemplate><Border Width="{Binding W}" Height="10" Background="{Binding Color}" ToolTip="{Binding Tip}"/></DataTemplate>
+                        <DataTemplate><Button Style="{StaticResource BarSeg}" Width="{Binding W}" Height="10" Background="{Binding Color}" ToolTip="{Binding Tip}" Tag="{Binding}"/></DataTemplate>
                       </ItemsControl.ItemTemplate>
                     </ItemsControl>
                   </Border>
@@ -2037,11 +2174,13 @@ $xaml = @'
                     <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
                     <ItemsControl.ItemTemplate>
                       <DataTemplate>
-                        <StackPanel Orientation="Horizontal" Margin="0,0,14,6" ToolTip="{Binding Tip}">
-                          <Ellipse Width="8" Height="8" Fill="{Binding Color}" VerticalAlignment="Center"/>
-                          <TextBlock Text="{Binding Name}" FontSize="11" FontWeight="SemiBold" Foreground="#AEB4C4" Margin="6,0,5,0" VerticalAlignment="Center"/>
-                          <TextBlock Text="{Binding SizeText}" FontSize="11" Foreground="#8B92A6" VerticalAlignment="Center"/>
-                        </StackPanel>
+                        <Button Style="{StaticResource Chip}" Tag="{Binding}" Margin="-5,0,6,4" ToolTip="Ver qué carpetas y archivos forman esta categoría">
+                          <StackPanel Orientation="Horizontal" IsHitTestVisible="False">
+                            <Ellipse Width="8" Height="8" Fill="{Binding Color}" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding Name}" FontSize="11" FontWeight="SemiBold" Foreground="#AEB4C4" Margin="6,0,5,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="{Binding SizeText}" FontSize="11" Foreground="#8B92A6" VerticalAlignment="Center"/>
+                          </StackPanel>
+                        </Button>
                       </DataTemplate>
                     </ItemsControl.ItemTemplate>
                   </ItemsControl>
@@ -2351,6 +2490,92 @@ $xaml = @'
                 </StackPanel>
               </Button>
               <Button x:Name="BtnDeleteItem" Style="{StaticResource BtnDanger}">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
+                  <TextBlock Text="Eliminar"/>
+                </StackPanel>
+              </Button>
+            </StackPanel>
+          </Grid>
+        </Border>
+      </Grid>
+
+      <!-- ===== DETALLE DE CATEGORÍA ===== -->
+      <Grid x:Name="PageCat" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel Orientation="Horizontal">
+          <Button x:Name="BtnCatBack" Style="{StaticResource Btn}" Padding="11,9" VerticalAlignment="Center" ToolTip="Volver al resumen">
+            <TextBlock Text="&#xE72B;" FontFamily="Segoe MDL2 Assets"/>
+          </Button>
+          <Border x:Name="CatDot" Width="16" Height="16" CornerRadius="8" Margin="18,0,12,0" VerticalAlignment="Center" Background="#C86BFA"/>
+          <StackPanel VerticalAlignment="Center">
+            <TextBlock x:Name="CatTitle" Text="Categoría" Style="{StaticResource H1}"/>
+            <TextBlock x:Name="CatSub" Style="{StaticResource Hint}" Margin="0,2,0,0"/>
+          </StackPanel>
+        </StackPanel>
+        <Border Grid.Row="1" Style="{StaticResource CardBorder}" Margin="0,18,0,0" Padding="16,12">
+          <Grid>
+            <DockPanel Margin="0,0,250,0" LastChildFill="True">
+              <TextBlock DockPanel.Dock="Left" Text="&#xE946;" FontFamily="Segoe MDL2 Assets" FontSize="16" Foreground="#9C86FF" VerticalAlignment="Top" Margin="0,1,12,0"/>
+              <TextBlock x:Name="CatHint" FontSize="12.5" Foreground="#C8CCD8" TextWrapping="Wrap" VerticalAlignment="Center"/>
+            </DockPanel>
+            <Button x:Name="BtnCatAction" Style="{StaticResource BtnPrimary}" HorizontalAlignment="Right" VerticalAlignment="Center" Visibility="Collapsed" Content="Acción"/>
+          </Grid>
+        </Border>
+        <Border Grid.Row="2" Style="{StaticResource CardBorder}" Padding="8" Margin="0,14,0,0">
+          <Grid>
+            <ListBox x:Name="CatList" Style="{StaticResource List}">
+              <ListBox.ItemTemplate>
+                <DataTemplate>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="40"/><ColumnDefinition Width="*"/><ColumnDefinition Width="230"/><ColumnDefinition Width="90"/><ColumnDefinition Width="64"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="{Binding Icon}" FontFamily="Segoe MDL2 Assets" FontSize="20" VerticalAlignment="Center">
+                      <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                          <Setter Property="Foreground" Value="#F5B83D"/>
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding Kind}" Value="file"><Setter Property="Foreground" Value="#00C2FF"/></DataTrigger>
+                            <DataTrigger Binding="{Binding Kind}" Value="small"><Setter Property="Foreground" Value="#8B92A6"/></DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </TextBlock.Style>
+                    </TextBlock>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
+                      <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                      <TextBlock Text="{Binding Detail}" FontSize="11.5" Foreground="#8B92A6" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                    </StackPanel>
+                    <ProgressBar Grid.Column="2" Value="{Binding Percent, Mode=OneWay}" Maximum="100" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock Grid.Column="3" Text="{Binding SizeText}" FontSize="13.5" FontWeight="SemiBold" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="4" Text="{Binding PercentText}" FontSize="12" Foreground="#8B92A6" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                  </Grid>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+            <TextBox x:Name="CatRaw" Visibility="Collapsed" Background="Transparent" BorderThickness="0" Foreground="#B9F5D8"
+                     FontFamily="Cascadia Mono, Consolas" FontSize="12" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Padding="14"/>
+          </Grid>
+        </Border>
+        <Border Grid.Row="3" Style="{StaticResource CardBorder}" Margin="0,12,0,8" Padding="16,12">
+          <Grid>
+            <TextBlock x:Name="CatInfo" FontSize="12" Foreground="#8B92A6" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,520,0"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+              <Button x:Name="BtnCatOpen" Style="{StaticResource Btn}" Margin="0,0,10,0">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE838;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
+                  <TextBlock Text="Abrir en Explorador"/>
+                </StackPanel>
+              </Button>
+              <Button x:Name="BtnCatBrowse" Style="{StaticResource Btn}" Margin="0,0,10,0">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE8B7;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
+                  <TextBlock Text="Ver contenido"/>
+                </StackPanel>
+              </Button>
+              <Button x:Name="BtnCatDelete" Style="{StaticResource BtnDanger}">
                 <StackPanel Orientation="Horizontal">
                   <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
                   <TextBlock Text="Eliminar"/>
@@ -2675,12 +2900,13 @@ $script:JobTask = $null; $script:MeasureTask = $null; $script:CleanTask = $null;
 $script:CurNode = $null; $script:ScanRoot = $null; $script:ScanDrive = $null
 $script:CleanLoaded = $false
 $script:FullSeg = @{}
+$script:Breakdowns = @{}; $script:PendingCat = $null
 $script:DupTask = $null; $script:DupDelTask = $null; $script:DupItems = $null; $script:LeftItems = $null
 
 function Set-Status([string]$msg) { $StatusText.Text = $msg }
 
 function Show-Page([string]$name) {
-    foreach ($p in 'PageHome', 'PageProgs', 'PageFolders', 'PageDups', 'PageClean') {
+    foreach ($p in 'PageHome', 'PageProgs', 'PageFolders', 'PageDups', 'PageClean', 'PageCat') {
         $el = Get-Variable -Name $p -ValueOnly -Scope Script
         if ($p -eq $name) { $el.Visibility = 'Visible' } else { $el.Visibility = 'Collapsed' }
     }
@@ -2693,12 +2919,13 @@ function Load-Drives {
     foreach ($d in $script:Drives) {
         if ($script:FullSeg.ContainsKey($d.Root)) {
             $d.Segments = $script:FullSeg[$d.Root]
-            $d.ChartNote = 'Desglose completo del último análisis.'
+            $d.ChartNote = 'Haz clic en una categoría para ver qué carpetas y archivos la forman.'
         }
         else {
             $d.Segments = [DiskPilot.Categorizer]::Quick($d, $script:Programs)
-            $d.ChartNote = 'Vista rápida según los programas instalados. Pulsa «Analizar» para el desglose completo.'
+            $d.ChartNote = 'Vista rápida: haz clic en «Otros» (o en cualquier categoría) para analizar y ver exactamente qué archivos son.'
         }
+        foreach ($s in $d.Segments) { $s.Root = $d.Root }
         [DiskPilot.Categorizer]::SetWidths($d.Segments, 356)
     }
     $DrivesList.ItemsSource = $null; $DrivesList.ItemsSource = $script:Drives
@@ -2887,20 +3114,23 @@ $script:BrushConv = New-Object System.Windows.Media.BrushConverter
 function New-Brush([string]$c) { $script:BrushConv.ConvertFromString($c) }
 
 function Render-Chart($segs, [string]$title, [string]$sub) {
-    $ChartTitle.Text = $title; $ChartSub.Text = $sub
+    $ChartTitle.Text = $title; $ChartSub.Text = $sub + '   ·   haz clic en una categoría para ver su contenido'
     $g = New-Object System.Windows.Controls.Grid
     $ChartLegend.Children.Clear()
     $i = 0
     foreach ($s in $segs) {
         $cd = New-Object System.Windows.Controls.ColumnDefinition
-        $cd.Width = New-Object System.Windows.GridLength([double][Math]::Max(1, $s.Size), ([System.Windows.GridUnitType]::Star))
+        $cd.Width = New-Object System.Windows.GridLength([Math]::Max([double]1, [double]$s.Size), ([System.Windows.GridUnitType]::Star))
         $g.ColumnDefinitions.Add($cd)
         $b = New-Object System.Windows.Controls.Border
-        $b.Background = New-Brush $s.Color; $b.ToolTip = $s.Tip
+        $b.Background = New-Brush $s.Color; $b.ToolTip = $s.Tip; $b.Tag = $s; $b.Cursor = [System.Windows.Input.Cursors]::Hand
+        $b.Add_MouseLeftButtonUp($script:SegClick)
         [System.Windows.Controls.Grid]::SetColumn($b, $i); [void]$g.Children.Add($b); $i++
 
         $sp = New-Object System.Windows.Controls.StackPanel
-        $sp.Orientation = 'Horizontal'; $sp.Margin = New-Object System.Windows.Thickness(0, 0, 24, 8); $sp.ToolTip = $s.Tip
+        $sp.Orientation = 'Horizontal'; $sp.Margin = New-Object System.Windows.Thickness(0, 0, 24, 8); $sp.ToolTip = 'Ver qué contiene: ' + $s.Name
+        $sp.Tag = $s; $sp.Cursor = [System.Windows.Input.Cursors]::Hand; $sp.Background = [System.Windows.Media.Brushes]::Transparent
+        $sp.Add_MouseLeftButtonUp($script:SegClick)
         $el = New-Object System.Windows.Shapes.Ellipse
         $el.Width = 10; $el.Height = 10; $el.Fill = New-Brush $s.Color; $el.VerticalAlignment = 'Center'
         $t1 = New-Object System.Windows.Controls.TextBlock
@@ -2916,6 +3146,109 @@ function Render-Chart($segs, [string]$title, [string]$sub) {
     }
     $ChartBarHost.Child = $g
     $ChartCard.Visibility = 'Visible'
+}
+
+# ---------- Detalle de categoría ----------
+$script:SegClick = [System.Windows.Input.MouseButtonEventHandler] {
+    param($sender, $e)
+    $s = $sender.Tag
+    if ($s) { Open-Category $s.Root $s.Cat }
+}
+
+$script:CatHints = @{
+    0 = 'Juegos instalados. Para quitar uno por completo usa «Programas» (desinstalación a fondo) o su launcher (Steam, Epic…).'
+    1 = 'Carpetas de programas instalados. Desinstálalos desde «Programas» para borrar también sus restos.'
+    2 = 'Windows, archivo de paginación (pagefile.sys) e hibernación (hiberfil.sys). Están protegidos; la hibernación se puede desactivar en «Limpieza rápida».'
+    3 = 'Configuración y cachés de programas (AppData y ProgramData). Aquí suelen quedar restos de programas ya desinstalados que puedes borrar.'
+    4 = 'Tus archivos: Descargas, Documentos, Vídeos, Escritorio, proyectos, cachés de desarrollo… Revisa lo que ya no necesites.'
+    5 = 'Archivos temporales y papelera: se pueden borrar sin riesgo desde «Limpieza rápida».'
+    6 = 'Carpetas que no están en las ubicaciones estándar de Windows: juegos o proyectos instalados directamente en la raíz del disco, copias de seguridad, descargas de launchers, etc.'
+    7 = 'Espacio ocupado que no aparece en ninguna carpeta: puntos de restauración e instantáneas del sistema (VSS), archivos protegidos o metadatos del disco. Se reduce desde «Protección del sistema».'
+}
+
+function Open-Category([string]$root, [int]$cat) {
+    if ($cat -ge 8) { Set-Status 'Ese es el espacio libre de la unidad.'; return }
+    if (-not $script:Breakdowns.ContainsKey($root)) {
+        if ($script:ScanTask) { Set-Status 'Espera a que termine el análisis en curso.'; return }
+        $script:PendingCat = @($root, $cat)
+        Start-Scan $root
+        Set-Status ("Analizando {0} para mostrar qué contiene cada categoría…" -f $root)
+        return
+    }
+    $bd = $script:Breakdowns[$root]
+    $seg = $bd.Segments | Where-Object { $_.Cat -eq $cat } | Select-Object -First 1
+    $script:CatRoot = $root; $script:CatIdx = $cat
+    $name = if ($seg) { $seg.Name } else { 'Categoría' }
+    $CatTitle.Text = "{0} en {1}" -f $name, $root.TrimEnd('\')
+    $CatSub.Text = if ($seg) { "{0}  ·  {1:0.#}% del disco" -f $seg.SizeText, $seg.Percent } else { 'Vacío' }
+    $CatDot.Background = New-Brush $(if ($seg) { $seg.Color } else { '#56607A' })
+    $CatHint.Text = $script:CatHints[$cat]
+    $BtnCatAction.Visibility = 'Collapsed'
+    switch ($cat) {
+        { $_ -eq 2 -or $_ -eq 5 } { $BtnCatAction.Content = 'Ir a Limpieza rápida'; $BtnCatAction.Tag = 'clean'; $BtnCatAction.Visibility = 'Visible' }
+        { $_ -eq 0 -or $_ -eq 1 } { $BtnCatAction.Content = 'Ir a Programas'; $BtnCatAction.Tag = 'progs'; $BtnCatAction.Visibility = 'Visible' }
+        7 { $BtnCatAction.Content = 'Abrir Protección del sistema'; $BtnCatAction.Tag = 'vss'; $BtnCatAction.Visibility = 'Visible' }
+    }
+    if ($cat -eq 7) {
+        $CatList.Visibility = 'Collapsed'; $CatRaw.Visibility = 'Visible'
+        $out = [DiskPilot.Uninstaller]::RunHidden('vssadmin.exe', 'list shadowstorage', 15000)
+        if (-not $out) { $out = 'Sin datos: se necesitan permisos de administrador para consultar las instantáneas.' }
+        $CatRaw.Text = "Espacio reservado para puntos de restauración e instantáneas (vssadmin list shadowstorage):`r`n`r`n" + $out
+        $CatInfo.Text = 'En «Protección del sistema» → Configurar puedes bajar el uso máximo o eliminar los puntos de restauración.'
+        $BtnCatOpen.IsEnabled = $false; $BtnCatBrowse.IsEnabled = $false; $BtnCatDelete.IsEnabled = $false
+    }
+    else {
+        $CatList.Visibility = 'Visible'; $CatRaw.Visibility = 'Collapsed'
+        $items = [DiskPilot.Categorizer]::Items($bd, $cat, 120)
+        $CatList.ItemsSource = $items
+        $CatInfo.Text = "{0} elementos ordenados por tamaño. Doble clic o «Ver contenido» para entrar en una carpeta." -f $items.Count
+        $BtnCatOpen.IsEnabled = $true; $BtnCatBrowse.IsEnabled = $true; $BtnCatDelete.IsEnabled = -not $script:DelTask
+    }
+    foreach ($n in @($NavHome, $NavProgs, $NavFolders, $NavDups, $NavClean)) { $n.IsChecked = $false }
+    Show-Page 'PageCat'
+}
+
+function Browse-CatItem($it) {
+    if (-not $it) { Set-Status 'Selecciona una carpeta de la lista.'; return }
+    $root = $script:CatRoot; $bd = $script:Breakdowns[$root]
+    $node = if ($it.Kind -eq 'dir') { $it.Node } else { $it.Owner }
+    if (-not $node -or -not $bd) { return }
+    $script:ScanDrive = $script:Drives | Where-Object { $_.Root -eq $root } | Select-Object -First 1
+    $script:ScanRoot = $bd.Root
+    if ($script:ScanDrive) {
+        Render-Chart $bd.Segments ("Qué ocupa " + $script:ScanDrive.Name) ("{0} usados de {1}" -f [DiskPilot.Fmt]::Size($script:ScanDrive.Used), [DiskPilot.Fmt]::Size($script:ScanDrive.Total))
+    }
+    $NavFolders.IsChecked = $true
+    Show-Node $node
+}
+
+function Refresh-Breakdown([string]$root) {
+    if (-not $root -or -not $script:Breakdowns.ContainsKey($root)) { return }
+    $d = [DiskPilot.DriveCard]::GetAll() | Where-Object { $_.Root -eq $root } | Select-Object -First 1
+    if (-not $d) { return }
+    $bd = [DiskPilot.Categorizer]::Analyze($script:Breakdowns[$root].Root, $d.Total, $d.Free, $script:Programs)
+    $script:Breakdowns[$root] = $bd; $script:FullSeg[$root] = $bd.Segments
+    Load-Drives
+    if ($script:ScanDrive -and $script:ScanDrive.Root -eq $root -and $ChartCard.Visibility -eq 'Visible') {
+        Render-Chart $bd.Segments ("Qué ocupa " + $d.Name) ("{0} usados de {1}" -f [DiskPilot.Fmt]::Size($d.Used), [DiskPilot.Fmt]::Size($d.Total))
+    }
+}
+
+function Delete-DiskItem($it) {
+    if (-not $it) { Set-Status 'Selecciona una carpeta o archivo.'; return }
+    if ($script:DelTask) { Set-Status 'Ya se está borrando algo; espera a que termine.'; return }
+    if ($it.Kind -eq 'small') { Set-Status 'Ese elemento agrupa archivos sueltos pequeños; ábrelo con «Ver contenido» o en el Explorador.'; return }
+    if ([DiskPilot.Safety]::IsProtected($it.FullPath)) {
+        [System.Windows.MessageBox]::Show("«$($it.FullPath)» es una ubicación protegida del sistema y no se puede borrar desde aquí.`n`nSi pertenece a un programa, desinstálalo desde la sección «Programas».", 'Ubicación protegida', 'OK', 'Information') | Out-Null
+        return
+    }
+    $size = if ($it.Kind -eq 'dir' -and $it.Node) { [DiskPilot.Fmt]::Size($it.Node.Size) } else { $it.SizeText }
+    $r = [System.Windows.MessageBox]::Show("¿Eliminar DEFINITIVAMENTE?`n`n$($it.FullPath)`n`nTamaño: $size`n`nNo pasa por la papelera y no se puede deshacer.", 'Confirmar eliminación', 'YesNo', 'Warning')
+    if ($r -ne 'Yes') { return }
+    $script:DelItem = $it
+    $BtnDeleteItem.IsEnabled = $false; $BtnCatDelete.IsEnabled = $false
+    Set-Status ("Eliminando {0}…" -f $it.FullPath)
+    $script:DelTask = [DiskPilot.Cleaner]::DeletePathAsync($it.FullPath)
 }
 
 # ---------- Duplicados ----------
@@ -2984,11 +3317,16 @@ $timer.Add_Tick({
                     Show-Node $t.Result
                     $TopFilesList.ItemsSource = [DiskPilot.Scanner]::TopFiles(40)
                     $HomeFilesHint.Text = "Archivos de más de 200 MB en {0}. Doble clic abre su ubicación." -f $t.Result.Path
-                    if ($script:ScanDrive) {
-                        $segs = [DiskPilot.Categorizer]::Classify($t.Result, $script:ScanDrive.Total, $script:ScanDrive.Free, $script:Programs)
-                        $script:FullSeg[$script:ScanDrive.Root] = $segs
-                        Render-Chart $segs ("Qué ocupa " + $script:ScanDrive.Name) ("{0} usados de {1}" -f [DiskPilot.Fmt]::Size($script:ScanDrive.Used), [DiskPilot.Fmt]::Size($script:ScanDrive.Total))
+                    if ($script:ScanDrive -and -not [DiskPilot.Scanner]::Cancel) {
+                        $bd = [DiskPilot.Categorizer]::Analyze($t.Result, $script:ScanDrive.Total, $script:ScanDrive.Free, $script:Programs)
+                        $script:Breakdowns[$script:ScanDrive.Root] = $bd
+                        $script:FullSeg[$script:ScanDrive.Root] = $bd.Segments
+                        Render-Chart $bd.Segments ("Qué ocupa " + $script:ScanDrive.Name) ("{0} usados de {1}" -f [DiskPilot.Fmt]::Size($script:ScanDrive.Used), [DiskPilot.Fmt]::Size($script:ScanDrive.Total))
                         Load-Drives
+                        if ($script:PendingCat -and $script:PendingCat[0] -eq $script:ScanDrive.Root) {
+                            $pc = $script:PendingCat; $script:PendingCat = $null
+                            Open-Category $pc[0] $pc[1]
+                        }
                     }
                     $secs = [int]((Get-Date) - $script:ScanStart).TotalSeconds
                     if ([DiskPilot.Scanner]::Cancel) { Set-Status 'Análisis cancelado: los datos mostrados están incompletos.' }
@@ -3089,15 +3427,17 @@ $timer.Add_Tick({
         # Borrado desde el explorador
         if ($script:DelTask -and $script:DelTask.IsCompleted) {
             $t = $script:DelTask; $script:DelTask = $null
-            $BtnDeleteItem.IsEnabled = $true
+            $BtnDeleteItem.IsEnabled = $true; $BtnCatDelete.IsEnabled = $true
             $it = $script:DelItem
             if (-not $t.IsFaulted -and $t.Result) {
                 [DiskPilot.Scanner]::Remove($it)
-                Set-Status ("Eliminado: {0} ({1} liberados)" -f $it.FullPath, $it.SizeText)
+                Set-Status ("Eliminado: {0}" -f $it.FullPath)
             }
             else { Set-Status ("No se pudo borrar todo en {0}: algunos archivos están en uso y se eliminarán al reiniciar." -f $it.FullPath) }
-            if ($script:CurNode) { Show-Node $script:CurNode }
             Load-Drives
+            Refresh-Breakdown ([IO.Path]::GetPathRoot($it.FullPath))
+            if ($PageFolders.Visibility -eq 'Visible' -and $script:CurNode) { Show-Node $script:CurNode }
+            if ($PageCat.Visibility -eq 'Visible') { Open-Category $script:CatRoot $script:CatIdx }
         }
     }
     catch { Set-Status ('Error: ' + $_.Exception.Message) }
@@ -3109,6 +3449,23 @@ $NavProgs.Add_Checked({ Show-Page 'PageProgs' })
 $NavFolders.Add_Checked({ Show-Page 'PageFolders' })
 $NavClean.Add_Checked({ Show-Page 'PageClean' })
 $NavDups.Add_Checked({ Show-Page 'PageDups' })
+$BtnCatBack.Add_Click({ $NavHome.IsChecked = $true; Show-Page 'PageHome' })
+$CatList.Add_MouseDoubleClick({ Browse-CatItem $CatList.SelectedItem })
+$BtnCatBrowse.Add_Click({ Browse-CatItem $CatList.SelectedItem })
+$BtnCatDelete.Add_Click({ Delete-DiskItem $CatList.SelectedItem })
+$BtnCatOpen.Add_Click({
+    $it = $CatList.SelectedItem
+    if (-not $it) { Set-Status 'Selecciona un elemento de la lista.'; return }
+    if ($it.Kind -eq 'file') { Start-Process explorer.exe "/select,`"$($it.FullPath)`"" }
+    else { Start-Process explorer.exe "`"$($it.FullPath)`"" }
+})
+$BtnCatAction.Add_Click({
+    switch ([string]$BtnCatAction.Tag) {
+        'clean' { $NavClean.IsChecked = $true }
+        'progs' { $NavProgs.IsChecked = $true }
+        'vss' { Start-Process 'SystemPropertiesProtection.exe' }
+    }
+})
 
 $dupDriveClick = [System.Windows.RoutedEventHandler] {
     param($s, $e)
@@ -3169,7 +3526,10 @@ $BtnGoProgs.Add_Click({ $NavProgs.IsChecked = $true })
 $driveClick = [System.Windows.RoutedEventHandler] {
     param($s, $e)
     $b = $e.OriginalSource
-    if ($b -is [System.Windows.Controls.Button] -and $b.Tag) { Start-Scan ([string]$b.Tag) }
+    if ($b -is [System.Windows.Controls.Button] -and $b.Tag) {
+        if ($b.Tag -is [DiskPilot.Segment]) { Open-Category $b.Tag.Root $b.Tag.Cat }
+        else { Start-Scan ([string]$b.Tag) }
+    }
 }
 $DrivesList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $driveClick)
 $DriveButtons.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $driveClick)
@@ -3191,21 +3551,7 @@ $BtnOpenFolder.Add_Click({
     elseif ($it) { Start-Process explorer.exe "`"$($it.FullPath)`"" }
     elseif ($script:CurNode) { Start-Process explorer.exe "`"$($script:CurNode.Path)`"" }
 })
-$BtnDeleteItem.Add_Click({
-    $it = $FolderList.SelectedItem
-    if (-not $it) { Set-Status 'Selecciona una carpeta o archivo.'; return }
-    if ($it.Kind -eq 'small') { Set-Status 'Ese elemento agrupa archivos sueltos pequeños; elimina la carpeta completa o ábrela en el Explorador.'; return }
-    if ([DiskPilot.Safety]::IsProtected($it.FullPath)) {
-        [System.Windows.MessageBox]::Show("«$($it.FullPath)» es una ubicación protegida del sistema y no se puede borrar desde aquí.`n`nSi pertenece a un programa, desinstálalo desde la sección «Programas».", 'Ubicación protegida', 'OK', 'Information') | Out-Null
-        return
-    }
-    $r = [System.Windows.MessageBox]::Show("¿Eliminar DEFINITIVAMENTE?`n`n$($it.FullPath)`n`nTamaño: $($it.SizeText)`n`nNo pasa por la papelera y no se puede deshacer.", 'Confirmar eliminación', 'YesNo', 'Warning')
-    if ($r -ne 'Yes') { return }
-    $script:DelItem = $it
-    $BtnDeleteItem.IsEnabled = $false
-    Set-Status ("Eliminando {0}…" -f $it.FullPath)
-    $script:DelTask = [DiskPilot.Cleaner]::DeletePathAsync($it.FullPath)
-})
+$BtnDeleteItem.Add_Click({ Delete-DiskItem $FolderList.SelectedItem })
 $TopFilesList.Add_MouseDoubleClick({
     $it = $TopFilesList.SelectedItem
     if ($it) { Start-Process explorer.exe "/select,`"$($it.FullPath)`"" }
@@ -3279,7 +3625,27 @@ if ($SelfTest) {
     exit
 }
 
-if ($Screenshot) {
+if ($Screenshot -and $TestCategory) {
+    # Prueba: abre «Otros» de una unidad (lanza el análisis) y captura la pantalla del detalle
+    $window.Add_ContentRendered({ Open-Category $TestCategory 6 })
+    $script:shotTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:shotTimer.Interval = [TimeSpan]::FromSeconds(3)
+    $script:shotTimer.Add_Tick({
+        if (-not $script:testStart) { $script:testStart = Get-Date }
+        Add-Content ($Screenshot -replace '\.png$', '-status.txt') ("{0:T}  {1}" -f (Get-Date), $StatusText.Text)
+        if ($PageCat.Visibility -ne 'Visible' -and ((Get-Date) - $script:testStart).TotalSeconds -lt 300) { return }
+        $script:shotTimer.Stop()
+        $el = $window.Content
+        $rtb = New-Object System.Windows.Media.Imaging.RenderTargetBitmap([int]$el.ActualWidth, [int]$el.ActualHeight, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+        $rtb.Render($el)
+        $enc = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+        $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
+        $fs = [IO.File]::Create(($Screenshot -replace '\.png$', '-Cat.png')); $enc.Save($fs); $fs.Close()
+        $window.Close()
+    })
+    $script:shotTimer.Start()
+}
+elseif ($Screenshot) {
     $script:shotTimer = New-Object System.Windows.Threading.DispatcherTimer
     $script:shotTimer.Interval = [TimeSpan]::FromSeconds(9)
     $script:shotPage = 0
