@@ -38,6 +38,13 @@ Nunca se borran: la carpeta de Windows, raíces de *Archivos de programa*, *Prog
 1. Descarga **`DiskPilot.exe`** desde la [última release](https://github.com/Cordobot/DiskPilot/releases/latest).
 2. Ábrelo con doble clic y acepta el aviso de administrador (UAC).
 
+Al abrirlo, DiskPilot **se instala o se actualiza solo**:
+
+- Cierra la versión anterior si está abierta (si ya está abierta esta misma versión, la trae al frente).
+- Se instala en `%LOCALAPPDATA%\Programs\DiskPilot` sustituyendo la versión anterior, con acceso directo en el menú Inicio (y en el Escritorio la primera vez).
+- Borra los archivos de versiones anteriores, incluidos los `DiskPilot*.exe` antiguos en Descargas y Escritorio.
+- Aparece en **Configuración → Aplicaciones instaladas**, desde donde se puede desinstalar (o con `DiskPilot.exe --uninstall`).
+
 > Al no estar firmado digitalmente, Windows SmartScreen puede mostrar «Windows protegió tu PC». Pulsa **Más información → Ejecutar de todas formas**.
 
 ### Opción 2 — Script
