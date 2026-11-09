@@ -1,5 +1,5 @@
 ﻿# =====================================================================
-#  DiskPilot v1.1.0 - Analizador de disco y desinstalador a fondo para Windows
+#  DiskPilot v1.2.0 - Analizador de disco y desinstalador a fondo para Windows
 #  Requiere: Windows 10/11 con PowerShell 5.1 (incluido en Windows)
 # =====================================================================
 param(
@@ -8,7 +8,7 @@ param(
     [string]$Screenshot
 )
 $ErrorActionPreference = 'Continue'
-$AppVersion = '1.1.0'
+$AppVersion = '1.2.0'
 
 # ---------- Elevación a administrador ----------
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -20,7 +20,7 @@ if (-not $IsAdmin -and -not $NoElevate -and -not $SelfTest -and -not $Screenshot
     exit
 }
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing
 
 # =====================================================================
 #  Motor (C#)
@@ -33,6 +33,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -156,6 +157,8 @@ namespace DiskPilot
         public double UsedPct { get { return Total > 0 ? Used * 100.0 / Total : 0; } }
         public string UsedText { get { return Fmt.Size(Used) + " de " + Fmt.Size(Total); } }
         public string FreeText { get { return Fmt.Size(Free) + " libres  ·  " + UsedPct.ToString("0") + "% ocupado"; } }
+        public List<Segment> Segments { get; set; }
+        public string ChartNote { get; set; }
 
         public static List<DriveCard> GetAll()
         {
@@ -311,6 +314,41 @@ namespace DiskPilot
             return total;
         }
 
+        // Recorre un árbol llamando a onFile(ruta, tamaño, fechaModificación). Omite archivos en la nube no descargados.
+        public static void Walk(string root, Func<string, bool> enterDir, Action<string, long, long> onFile, Func<bool> cancel)
+        {
+            var st = new Stack<string>(); st.Push(root.TrimEnd('\\'));
+            while (st.Count > 0)
+            {
+                if (cancel()) return;
+                string b = st.Pop();
+                WIN32_FIND_DATA fd;
+                IntPtr h = FindFirstFileExW(@"\\?\" + b + @"\*", 1, out fd, 0, IntPtr.Zero, 2);
+                if (h == INVALID) continue;
+                try
+                {
+                    do
+                    {
+                        string n = fd.cFileName;
+                        if (n == "." || n == "..") continue;
+                        string full = b + "\\" + n;
+                        if ((fd.dwFileAttributes & 0x10) != 0)
+                        {
+                            if ((fd.dwFileAttributes & 0x400) == 0 && enterDir(full)) st.Push(full);
+                        }
+                        else
+                        {
+                            if ((fd.dwFileAttributes & 0x441400) != 0) continue;
+                            long s = ((long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+                            long t = ((long)fd.ftLastWriteTime.dwHighDateTime << 32) | (uint)fd.ftLastWriteTime.dwLowDateTime;
+                            onFile(full, s, t);
+                        }
+                    } while (FindNextFileW(h, out fd));
+                }
+                finally { FindClose(h); }
+            }
+        }
+
         static string Ext(string n)
         {
             string e = System.IO.Path.GetExtension(n);
@@ -368,6 +406,149 @@ namespace DiskPilot
     }
 
     // ------------------------------------------------------------------
+    //  Gráfica por categorías (estilo Steam)
+    // ------------------------------------------------------------------
+    public class Segment
+    {
+        public string Name { get; set; }
+        public string Color { get; set; }
+        public long Size { get; set; }
+        public string SizeText { get; set; }
+        public double Percent { get; set; }
+        public double W { get; set; }
+        public string Tip { get; set; }
+    }
+
+    public static class Categorizer
+    {
+        static readonly string[] Names = { "Juegos", "Programas", "Sistema", "Datos de apps", "Archivos personales", "Temporales y papelera", "Otros", "No visible", "Libre" };
+        static readonly string[] Colors = { "#1A9FFF", "#7C5CFF", "#8792AB", "#2ED39A", "#F5B83D", "#FF4D6A", "#C86BFA", "#56607A", "#2B3142" };
+        static readonly string[] GameDirs = { "steamapps", "steamlibrary", "epic games", "riot games", "gog games", "gog galaxy", "xboxgames",
+            "ea games", "rockstar games", "ubisoft game launcher", "origin games", "games", "juegos", "roberts space industries" };
+        static readonly string[] GamePubs = { "valve", "epic games", "riot", "rockstar", "ubisoft", "electronic arts", "arenanet", "cloud imperium",
+            "roberts space", "activision", "blizzard", "bethesda", "cd projekt", "saber interactive", "arrowhead", "bandai", "capcom", "square enix",
+            "sega", "2k games", "paradox", "unknown worlds", "the indie stone", "squad", "mojang", "krafton", "bungie", "mihoyo", "hoyoverse",
+            "cognosphere", "hi-rez", "wargaming", "gaijin", "facepunch", "re-logic", "jakehub", "respawn", "techland", "warner bros", "devolver",
+            "team17", "klei", "coffee stain", "larian", "fromsoftware", "bohemia", "cfx.re", "garena", "nexon", "smilegate", "pearl abyss",
+            "amazon games", "innersloth", "psyonix", "digital extremes", "grinding gear", "gearbox", "io interactive", "remedy", "insomniac",
+            "sony interactive", "xbox game studios", "kerbal", "private division", "landfall", "ghost ship", "frontier developments" };
+
+        public static bool IsGame(ProgramInfo p)
+        {
+            string pub = (p.Publisher ?? "").ToLowerInvariant();
+            foreach (var g in GamePubs) if (pub.Contains(g)) return true;
+            string d = (p.InstallDir ?? "").ToLowerInvariant() + "\\";
+            foreach (var g in GameDirs) if (d.Contains("\\" + g + "\\")) return true;
+            return false;
+        }
+
+        static List<Segment> Build(long[] acc, long total)
+        {
+            long sum = 0; foreach (var a in acc) sum += Math.Max(0, a);
+            double t = Math.Max(1, Math.Max(total, sum));
+            var l = new List<Segment>();
+            for (int i = 0; i < acc.Length; i++)
+            {
+                if (acc[i] <= 0) continue;
+                var s = new Segment();
+                s.Name = Names[i]; s.Color = Colors[i]; s.Size = acc[i]; s.SizeText = Fmt.Size(acc[i]);
+                s.Percent = acc[i] * 100.0 / t;
+                s.Tip = s.Name + ": " + s.SizeText + " (" + s.Percent.ToString("0.#") + "%)";
+                l.Add(s);
+            }
+            return l;
+        }
+
+        public static void SetWidths(List<Segment> l, double w)
+        {
+            if (l == null) return;
+            foreach (var s in l) s.W = Math.Max(0, Math.Floor(s.Percent * w / 100.0));
+        }
+
+        // Vista rápida sin escanear: usa el tamaño de las carpetas de los programas instalados
+        public static List<Segment> Quick(DriveCard d, List<ProgramInfo> progs)
+        {
+            var acc = new long[9];
+            if (progs != null)
+            {
+                var dirs = new List<ProgramInfo>();
+                foreach (var p in progs)
+                    if (!string.IsNullOrEmpty(p.InstallDir) && p.Size > 0 && p.InstallDir.StartsWith(d.Root, StringComparison.OrdinalIgnoreCase)) dirs.Add(p);
+                dirs.Sort((a, b) => a.InstallDir.Length.CompareTo(b.InstallDir.Length));
+                var taken = new List<string>();
+                foreach (var p in dirs)
+                {
+                    string k = p.InstallDir.TrimEnd('\\') + "\\";
+                    bool nested = false;
+                    foreach (var t in taken) if (k.StartsWith(t, StringComparison.OrdinalIgnoreCase)) { nested = true; break; }
+                    if (nested) continue;
+                    taken.Add(k);
+                    acc[IsGame(p) ? 0 : 1] += p.Size;
+                }
+            }
+            acc[6] = Math.Max(0, d.Used - acc[0] - acc[1]);
+            acc[8] = d.Free;
+            return Build(acc, d.Total);
+        }
+
+        static int Match(DirNode n, Dictionary<string, int> pd, int depth)
+        {
+            string name = n.Name.ToLowerInvariant();
+            string p = n.Path.ToLowerInvariant().TrimEnd('\\');
+            int c;
+            if (Array.IndexOf(GameDirs, name) >= 0) return 0;
+            if (pd.TryGetValue(p, out c)) return c;
+            if (depth == 1)
+            {
+                if (name == "windows" || name == "system volume information" || name == "recovery" || name == "$windows.~bt" ||
+                    name == "$windows.~ws" || name == "windows.old" || name == "$winreagent" || name == "boot") return 2;
+                if (name == "program files" || name == "program files (x86)") return 1;
+                if (name == "programdata") return 3;
+                if (name == "$recycle.bin") return 5;
+                if (name == "users") return 4;
+            }
+            if (name == "appdata") return 3;
+            if (name == "temp" || name == "tmp") return 5;
+            if (name == "windowsapps") return 1;
+            if (name == "programs" && p.EndsWith("\\appdata\\local\\programs")) return 1;
+            return -1;
+        }
+
+        static void Visit(DirNode n, int cat, int depth, long[] acc, Dictionary<string, int> pd)
+        {
+            if (depth > 0) { int m = Match(n, pd, depth); if (m >= 0) cat = m; }
+            long sub = 0;
+            foreach (var c in n.Dirs) { Visit(c, cat, depth + 1, acc, pd); sub += c.Size; }
+            long own = n.Size - sub;
+            if (depth == 0)
+                foreach (var f in n.BigFiles)
+                {
+                    string fn = f.Key.ToLowerInvariant();
+                    if (fn == "pagefile.sys" || fn == "hiberfil.sys" || fn == "swapfile.sys" || fn == "memory.dmp") { acc[2] += f.Value; own -= f.Value; }
+                }
+            acc[cat] += Math.Max(0, own);
+        }
+
+        // Desglose completo tras analizar una unidad
+        public static List<Segment> Classify(DirNode root, long total, long free, List<ProgramInfo> progs)
+        {
+            var pd = new Dictionary<string, int>();
+            if (progs != null)
+                foreach (var p in progs)
+                {
+                    if (string.IsNullOrEmpty(p.InstallDir)) continue;
+                    string k = p.InstallDir.ToLowerInvariant().TrimEnd('\\');
+                    if (!pd.ContainsKey(k)) pd[k] = IsGame(p) ? 0 : 1;
+                }
+            var acc = new long[9];
+            Visit(root, 6, 0, acc, pd);
+            acc[7] = Math.Max(0, (total - free) - root.Size);
+            acc[8] = free;
+            return Build(acc, total);
+        }
+    }
+
+    // ------------------------------------------------------------------
     //  Programas instalados
     // ------------------------------------------------------------------
     public class ProgramInfo : Bindable
@@ -381,6 +562,11 @@ namespace DiskPilot
         public string UninstallString, QuietUninstallString, ProductCode, Hive, View, KeyPath;
         public bool IsMsi;
         public long Estimated;
+        public string DisplayIcon;
+        bool sel;
+        public bool Selected { get { return sel; } set { sel = value; N("Selected"); } }
+        string icon;
+        public string IconPath { get { return icon; } set { icon = value; N("IconPath"); } }
         public string Initial { get { return string.IsNullOrEmpty(Name) ? "?" : Name.Substring(0, 1).ToUpperInvariant(); } }
         public string SubLine
         {
@@ -470,6 +656,7 @@ namespace DiskPilot
                                 { p.InstallDate = dt; p.InstallDateText = dt.ToString("dd/MM/yyyy"); }
                                 else p.InstallDateText = "";
                                 p.InstallDir = ResolveDir(S(s, "InstallLocation"), S(s, "DisplayIcon"), us);
+                                p.DisplayIcon = S(s, "DisplayIcon");
                                 list.Add(p);
                             }
                         }
@@ -585,6 +772,8 @@ namespace DiskPilot
         public long SizeBytes;
         public bool IsReg, IsService;
         public string RegHive, RegView, RegSub, Service;
+        public string Group { get; set; }
+        public ProgramInfo Owner;
     }
 
     public static class Leftovers
@@ -629,9 +818,31 @@ namespace DiskPilot
         static string[] Dirs(string p) { try { return Directory.GetDirectories(p); } catch { return new string[0]; } }
         static string[] Files(string p, string pat) { try { return Directory.GetFiles(p, pat); } catch { return new string[0]; } }
 
+        static HashSet<ProgramInfo> batch = new HashSet<ProgramInfo>();
+        static HashSet<string> gSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         public static Task<List<Leftover>> FindAsync(ProgramInfo p, List<ProgramInfo> all)
         {
-            return Task.Factory.StartNew(() => Find(p, all));
+            var l = new List<ProgramInfo>(); l.Add(p);
+            return FindManyAsync(l, all);
+        }
+
+        // Varios programas a la vez: las carpetas compartidas solo entre programas del lote se pueden borrar
+        public static Task<List<Leftover>> FindManyAsync(List<ProgramInfo> sel, List<ProgramInfo> all)
+        {
+            return Task.Factory.StartNew(() =>
+            {
+                batch = new HashSet<ProgramInfo>(sel);
+                gSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var res = new List<Leftover>();
+                foreach (var p in sel)
+                {
+                    var r = Find(p, all);
+                    foreach (var x in r) { x.Group = p.Name; x.Owner = p; }
+                    res.AddRange(r);
+                }
+                return res;
+            });
         }
 
         static int SharedWith(string dir, ProgramInfo p, List<ProgramInfo> all)
@@ -639,7 +850,7 @@ namespace DiskPilot
             int n = 0; string me = dir.TrimEnd('\\');
             foreach (var o in all)
             {
-                if (o == p || string.IsNullOrEmpty(o.InstallDir)) continue;
+                if (o == p || batch.Contains(o) || string.IsNullOrEmpty(o.InstallDir)) continue;
                 string od = o.InstallDir.TrimEnd('\\');
                 if (od.Equals(me, StringComparison.OrdinalIgnoreCase) || od.StartsWith(me + "\\", StringComparison.OrdinalIgnoreCase)) n++;
             }
@@ -688,11 +899,11 @@ namespace DiskPilot
         static List<Leftover> Find(ProgramInfo p, List<ProgramInfo> all)
         {
             var res = new List<Leftover>();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var seen = gSeen;
             string inst = string.IsNullOrEmpty(p.InstallDir) ? null : p.InstallDir.TrimEnd('\\');
 
             // 1) Carpeta de instalación
-            if (inst != null && Directory.Exists(inst) && !Safety.IsProtected(inst))
+            if (inst != null && !seen.Contains(inst) && Directory.Exists(inst) && !Safety.IsProtected(inst))
             {
                 int shared = SharedWith(inst, p, all);
                 var l = new Leftover();
@@ -858,6 +1069,22 @@ namespace DiskPilot
             return Task.Factory.StartNew(() => Run(j), TaskCreationOptions.LongRunning);
         }
 
+        public static int Current, Total;
+        public static Task RunManyAsync(List<UninstallJob> jobs)
+        {
+            Freed = 0; PendingReboot = 0; Total = jobs.Count; Current = 0;
+            string dummy; while (Log.TryDequeue(out dummy)) { }
+            return Task.Factory.StartNew(() =>
+            {
+                foreach (var j in jobs)
+                {
+                    Current++;
+                    if (Total > 1) L("═════════ Programa " + Current + " de " + Total + ": " + j.Name + " ═════════");
+                    try { Run(j); } catch (Exception ex) { L("Error: " + ex.Message); }
+                }
+            }, TaskCreationOptions.LongRunning);
+        }
+
         static void Run(UninstallJob j)
         {
             L("Iniciando desinstalación a fondo de: " + j.Name);
@@ -935,7 +1162,7 @@ namespace DiskPilot
             }
 
             L("────────────────────────────────────────");
-            L("COMPLETADO. Espacio liberado: " + Fmt.Size(Freed));
+            L("COMPLETADO: " + j.Name + ".  Espacio liberado en total: " + Fmt.Size(Freed));
             if (PendingReboot > 0) L(PendingReboot + " elemento(s) bloqueados se eliminarán al reiniciar Windows.");
         }
 
@@ -1052,6 +1279,276 @@ namespace DiskPilot
     }
 
     // ------------------------------------------------------------------
+    //  Iconos de los programas
+    // ------------------------------------------------------------------
+    public static class Icons
+    {
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        static extern uint PrivateExtractIcons(string file, int index, int cx, int cy, IntPtr[] icons, uint[] ids, uint n, uint flags);
+        [DllImport("user32.dll")]
+        static extern bool DestroyIcon(IntPtr h);
+        static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DiskPilot\\icons");
+
+        public static Task LoadAsync(List<ProgramInfo> list)
+        {
+            var copy = new List<ProgramInfo>(list);
+            return Task.Factory.StartNew(() =>
+            {
+                try { Directory.CreateDirectory(Dir); } catch { }
+                Parallel.ForEach(copy, new ParallelOptions { MaxDegreeOfParallelism = 4 }, p => { try { Load(p); } catch { } });
+            }, TaskCreationOptions.LongRunning);
+        }
+
+        static string Hash(string s)
+        {
+            using (var md5 = MD5.Create())
+                return BitConverter.ToString(md5.ComputeHash(System.Text.Encoding.UTF8.GetBytes(s.ToLowerInvariant()))).Replace("-", "");
+        }
+
+        static bool Source(ProgramInfo p, out string file, out int idx)
+        {
+            file = null; idx = 0;
+            if (!string.IsNullOrEmpty(p.DisplayIcon))
+            {
+                string s = p.DisplayIcon.Trim();
+                var m = Regex.Match(s, @"^(.*?),\s*(-?\d+)$");
+                if (m.Success) { s = m.Groups[1].Value; int.TryParse(m.Groups[2].Value, out idx); }
+                s = Environment.ExpandEnvironmentVariables(s.Trim().Trim('"'));
+                if (File.Exists(s) && !s.EndsWith("msiexec.exe", StringComparison.OrdinalIgnoreCase)) { file = s; return true; }
+                idx = 0;
+            }
+            if (!string.IsNullOrEmpty(p.InstallDir) && Directory.Exists(p.InstallDir))
+            {
+                string best = null; int bestScore = -1; string nn = Leftovers.Norm(p.Name);
+                string[] exes; try { exes = Directory.GetFiles(p.InstallDir, "*.exe"); } catch { exes = new string[0]; }
+                foreach (var e in exes)
+                {
+                    string fn = Path.GetFileNameWithoutExtension(e).ToLowerInvariant();
+                    if (fn.StartsWith("unins") || fn.Contains("uninstall") || fn.Contains("crash") || fn.Contains("update") ||
+                        fn.Contains("helper") || fn.Contains("setup") || fn.Contains("report")) continue;
+                    int score = 1; string ne = Leftovers.Norm(fn);
+                    if (ne.Length > 2 && nn.Length > 2 && (nn.Contains(ne) || ne.Contains(nn))) score = 3;
+                    if (score > bestScore) { bestScore = score; best = e; }
+                }
+                if (best != null) { file = best; return true; }
+            }
+            return false;
+        }
+
+        static void Load(ProgramInfo p)
+        {
+            string src; int idx;
+            if (!Source(p, out src, out idx)) return;
+            string png = Path.Combine(Dir, Hash(src + "|" + idx) + ".png");
+            if (!File.Exists(png))
+            {
+                string tmp = png + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                var hs = new IntPtr[1]; var ids = new uint[1];
+                uint got = 0;
+                try { got = PrivateExtractIcons(src, idx, 48, 48, hs, ids, 1, 0); } catch { }
+                if (got == 0 || got == 0xFFFFFFFF || hs[0] == IntPtr.Zero)
+                {
+                    try
+                    {
+                        using (var ic = System.Drawing.Icon.ExtractAssociatedIcon(src))
+                        {
+                            if (ic == null) return;
+                            using (var bmp = ic.ToBitmap()) bmp.Save(tmp, System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                    }
+                    catch { return; }
+                }
+                else
+                {
+                    try
+                    {
+                        using (var ic = System.Drawing.Icon.FromHandle(hs[0]))
+                        using (var bmp = ic.ToBitmap()) bmp.Save(tmp, System.Drawing.Imaging.ImageFormat.Png);
+                    }
+                    finally { DestroyIcon(hs[0]); }
+                }
+                try { if (!File.Exists(png)) File.Move(tmp, png); else File.Delete(tmp); } catch { try { File.Delete(tmp); } catch { } }
+            }
+            if (File.Exists(png)) p.IconPath = png;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  Archivos duplicados (tamaño -> hash parcial -> hash completo)
+    // ------------------------------------------------------------------
+    public class DupFile : Bindable
+    {
+        bool c;
+        public bool Checked { get { return c; } set { c = value; N("Checked"); } }
+        public string Name { get; set; }
+        public string Folder { get; set; }
+        public string FullPath { get; set; }
+        public long Size { get; set; }
+        public string SizeText { get; set; }
+        public string ModifiedText { get; set; }
+        public string Group { get; set; }
+        public int GroupId { get; set; }
+        public DateTime Modified;
+    }
+
+    public static class DupFinder
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct BHFI
+        {
+            public uint attr;
+            public System.Runtime.InteropServices.ComTypes.FILETIME c, a, w;
+            public uint vol, sizeHi, sizeLo, links, idxHi, idxLo;
+        }
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle h, out BHFI info);
+
+        public static volatile bool Cancel;
+        public static long Found, Candidates, HashDone, HashTotal, Wasted;
+        public static int Groups;
+        public static string Stage = "";
+
+        class F { public string P; public long S; public long T; }
+
+        static readonly string[] SkipNames = { "steamapps", "steamlibrary", "epic games", "riot games", "gog games", "xboxgames",
+            "windowsapps", "ea games", "rockstar games", "node_modules", ".git", "program files", "program files (x86)", "programdata", "appdata",
+            ".gradle", ".android", ".m2", ".nuget", ".cargo", ".rustup", ".conda", "anaconda3", "miniconda3", ".vscode", ".cache", "unity", "library" };
+
+        public static Task<List<DupFile>> FindAsync(string[] roots, long min, bool excludeApps)
+        {
+            Cancel = false; Found = 0; Candidates = 0; HashDone = 0; HashTotal = 0; Wasted = 0; Groups = 0;
+            Stage = "Buscando archivos";
+            return Task.Factory.StartNew(() => Run(roots, min, excludeApps), TaskCreationOptions.LongRunning);
+        }
+
+        static bool Enter(string dir, bool ex, string win)
+        {
+            if (dir.Equals(win, StringComparison.OrdinalIgnoreCase)) return false;
+            string n = Path.GetFileName(dir).ToLowerInvariant();
+            if (n == "$recycle.bin" || n == "system volume information" || n == "$windows.~bt" || n == "$windows.~ws") return false;
+            if (ex && Array.IndexOf(SkipNames, n) >= 0) return false;
+            return true;
+        }
+
+        static int ReadFull(Stream s, byte[] b, int n) { int r = 0, x; while (r < n && (x = s.Read(b, r, n - r)) > 0) r += x; return r; }
+
+        static string PartialHash(F f)
+        {
+            try
+            {
+                using (var fs = new FileStream(f.P, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 65536))
+                {
+                    BHFI bi;
+                    if (GetFileInformationByHandle(fs.SafeFileHandle, out bi) && bi.links > 1) return null; // enlaces duros: no son copias reales
+                    using (var md5 = MD5.Create())
+                    {
+                        const int chunk = 65536; var buf = new byte[chunk];
+                        int n = ReadFull(fs, buf, chunk); md5.TransformBlock(buf, 0, n, null, 0);
+                        if (f.S > chunk * 3)
+                        {
+                            fs.Seek(f.S / 2, SeekOrigin.Begin); n = ReadFull(fs, buf, chunk); md5.TransformBlock(buf, 0, n, null, 0);
+                            fs.Seek(-chunk, SeekOrigin.End); n = ReadFull(fs, buf, chunk); md5.TransformBlock(buf, 0, n, null, 0);
+                        }
+                        md5.TransformFinalBlock(buf, 0, 0);
+                        return Convert.ToBase64String(md5.Hash);
+                    }
+                }
+            }
+            catch { return null; }
+        }
+
+        static string FullHash(F f)
+        {
+            try
+            {
+                using (var fs = new FileStream(f.P, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 20, FileOptions.SequentialScan))
+                using (var md5 = MD5.Create())
+                {
+                    var buf = new byte[1 << 20]; int n;
+                    while ((n = fs.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        if (Cancel) return null;
+                        md5.TransformBlock(buf, 0, n, null, 0);
+                        Interlocked.Add(ref HashDone, n);
+                    }
+                    md5.TransformFinalBlock(buf, 0, 0);
+                    return Convert.ToBase64String(md5.Hash);
+                }
+            }
+            catch { return null; }
+        }
+
+        static List<List<F>> Split(List<F> g, bool partial)
+        {
+            var d = new Dictionary<string, List<F>>();
+            foreach (var f in g)
+            {
+                if (Cancel) break;
+                string h = partial ? PartialHash(f) : FullHash(f);
+                if (h == null) continue;
+                List<F> l; if (!d.TryGetValue(h, out l)) { l = new List<F>(); d[h] = l; }
+                l.Add(f);
+            }
+            var res = new List<List<F>>();
+            foreach (var kv in d) if (kv.Value.Count > 1) res.Add(kv.Value);
+            return res;
+        }
+
+        static List<DupFile> Run(string[] roots, long min, bool ex)
+        {
+            string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\');
+            var bySize = new Dictionary<long, List<F>>();
+            var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in roots)
+                Scanner.Walk(r, d => Enter(d, ex, win), (p, s, t) =>
+                {
+                    Found++;
+                    if (s < min || !seenPaths.Add(p)) return;
+                    List<F> l; if (!bySize.TryGetValue(s, out l)) { l = new List<F>(); bySize[s] = l; }
+                    var f = new F(); f.P = p; f.S = s; f.T = t; l.Add(f);
+                }, () => Cancel);
+
+            var stage1 = new List<List<F>>();
+            foreach (var kv in bySize) if (kv.Value.Count > 1) { stage1.Add(kv.Value); Candidates += kv.Value.Count; }
+
+            Stage = "Comparando inicio, mitad y final";
+            var stage2 = new List<List<F>>();
+            foreach (var g in stage1) { if (Cancel) break; stage2.AddRange(Split(g, true)); }
+
+            long tot = 0; foreach (var g in stage2) foreach (var f in g) tot += f.S;
+            HashTotal = tot;
+            Stage = "Verificando el contenido completo";
+            var groups = new List<List<F>>();
+            foreach (var g in stage2) { if (Cancel) break; groups.AddRange(Split(g, false)); }
+
+            groups.Sort((a, b) => (b[0].S * (b.Count - 1)).CompareTo(a[0].S * (a.Count - 1)));
+            var res = new List<DupFile>(); int gi = 0;
+            foreach (var g in groups)
+            {
+                if (gi >= 3000) break;
+                gi++;
+                g.Sort((a, b) => a.T.CompareTo(b.T)); // la copia más antigua primero
+                long waste = g[0].S * (g.Count - 1);
+                Wasted += waste;
+                string head = "#" + gi + "   " + Path.GetFileName(g[0].P) + "   ·   " + g.Count + " copias de " + Fmt.Size(g[0].S) +
+                              "   ·   " + Fmt.Size(waste) + " recuperables";
+                foreach (var f in g)
+                {
+                    var d = new DupFile();
+                    d.Name = Path.GetFileName(f.P); d.Folder = Path.GetDirectoryName(f.P); d.FullPath = f.P;
+                    d.Size = f.S; d.SizeText = Fmt.Size(f.S);
+                    try { d.Modified = DateTime.FromFileTime(f.T); d.ModifiedText = d.Modified.ToString("dd/MM/yyyy HH:mm"); } catch { d.ModifiedText = ""; }
+                    d.Group = head; d.GroupId = gi;
+                    res.Add(d);
+                }
+            }
+            Groups = gi;
+            Stage = "Listo";
+            return res;
+        }
+    }
+
+    // ------------------------------------------------------------------
     //  Limpieza rápida
     // ------------------------------------------------------------------
     public class CleanItem : Bindable
@@ -1160,6 +1657,27 @@ namespace DiskPilot
         static string[] SafeFiles(string p) { try { return Directory.GetFiles(p); } catch { return new string[0]; } }
         static string[] SafeDirs(string p) { try { return Directory.GetDirectories(p); } catch { return new string[0]; } }
 
+        public static Task<long> DeleteFilesAsync(List<string> files)
+        {
+            return Task.Factory.StartNew(() =>
+            {
+                long freed = 0;
+                foreach (var f in files)
+                {
+                    try
+                    {
+                        if (Safety.IsProtected(f) || !File.Exists(f)) continue;
+                        long s = new FileInfo(f).Length;
+                        File.SetAttributes(f, FileAttributes.Normal);
+                        File.Delete(f);
+                        freed += s;
+                    }
+                    catch { }
+                }
+                return freed;
+            }, TaskCreationOptions.LongRunning);
+        }
+
         public static Task<bool> DeletePathAsync(string path)
         {
             return Task.Factory.StartNew(() =>
@@ -1174,7 +1692,7 @@ namespace DiskPilot
 '@
 
 if (-not ('DiskPilot.Scanner' -as [type])) {
-    Add-Type -TypeDefinition $cs -Language CSharp
+    Add-Type -TypeDefinition $cs -Language CSharp -ReferencedAssemblies System.Drawing
 }
 
 # =====================================================================
@@ -1456,6 +1974,7 @@ $xaml = @'
           <RadioButton x:Name="NavHome" Style="{StaticResource Nav}" Tag="&#xE80F;" Content="Resumen" IsChecked="True" GroupName="nav"/>
           <RadioButton x:Name="NavProgs" Style="{StaticResource Nav}" Tag="&#xE71D;" Content="Programas" GroupName="nav"/>
           <RadioButton x:Name="NavFolders" Style="{StaticResource Nav}" Tag="&#xE8B7;" Content="Explorar disco" GroupName="nav"/>
+          <RadioButton x:Name="NavDups" Style="{StaticResource Nav}" Tag="&#xE8C8;" Content="Duplicados" GroupName="nav"/>
           <RadioButton x:Name="NavClean" Style="{StaticResource Nav}" Tag="&#xEA99;" Content="Limpieza rápida" GroupName="nav"/>
         </StackPanel>
         <Border Grid.Row="2" CornerRadius="12" Background="#171B24" BorderBrush="#232938" BorderThickness="1" Padding="12,10">
@@ -1485,7 +2004,7 @@ $xaml = @'
           <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
           <ItemsControl.ItemTemplate>
             <DataTemplate>
-              <Border Style="{StaticResource CardBorder}" Width="340" Margin="0,0,16,16">
+              <Border Style="{StaticResource CardBorder}" Width="400" Margin="0,0,16,16">
                 <StackPanel>
                   <Grid>
                     <StackPanel Orientation="Horizontal">
@@ -1505,8 +2024,28 @@ $xaml = @'
                     </Button>
                   </Grid>
                   <TextBlock Text="{Binding UsedText}" FontSize="22" FontWeight="SemiBold" Margin="0,18,0,10"/>
-                  <ProgressBar Value="{Binding UsedPct, Mode=OneWay}" Maximum="100" Height="10"/>
-                  <TextBlock Text="{Binding FreeText}" FontSize="12" Foreground="#8B92A6" Margin="0,8,0,0"/>
+                  <Border Width="356" Height="10" HorizontalAlignment="Left" Background="#242A38">
+                    <Border.Clip><RectangleGeometry Rect="0,0,356,10" RadiusX="5" RadiusY="5"/></Border.Clip>
+                    <ItemsControl ItemsSource="{Binding Segments}">
+                      <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate><Border Width="{Binding W}" Height="10" Background="{Binding Color}" ToolTip="{Binding Tip}"/></DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </Border>
+                  <ItemsControl ItemsSource="{Binding Segments}" Margin="0,12,0,0">
+                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,14,6" ToolTip="{Binding Tip}">
+                          <Ellipse Width="8" Height="8" Fill="{Binding Color}" VerticalAlignment="Center"/>
+                          <TextBlock Text="{Binding Name}" FontSize="11" FontWeight="SemiBold" Foreground="#AEB4C4" Margin="6,0,5,0" VerticalAlignment="Center"/>
+                          <TextBlock Text="{Binding SizeText}" FontSize="11" Foreground="#8B92A6" VerticalAlignment="Center"/>
+                        </StackPanel>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                  <TextBlock Text="{Binding ChartNote}" FontSize="11" Foreground="#5D6478" Margin="0,4,0,0" TextWrapping="Wrap"/>
                 </StackPanel>
               </Border>
             </DataTemplate>
@@ -1529,9 +2068,20 @@ $xaml = @'
                   <DataTemplate>
                     <Grid>
                       <Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition Width="*"/><ColumnDefinition Width="80"/></Grid.ColumnDefinitions>
-                      <Border Width="30" Height="30" CornerRadius="8" Background="{StaticResource Accent}" HorizontalAlignment="Left">
-                        <TextBlock Text="{Binding Initial}" Foreground="White" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                      </Border>
+                      <Grid Width="30" Height="30" HorizontalAlignment="Left">
+                    <Border CornerRadius="8" Background="{StaticResource Accent}">
+                      <Border.Style>
+                        <Style TargetType="Border">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding IconPath}" Value="{x:Null}"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </Border.Style>
+                      <TextBlock Text="{Binding Initial}" Foreground="White" FontWeight="Bold" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <Image Source="{Binding IconPath}" Width="26" Height="26" RenderOptions.BitmapScalingMode="HighQuality"/>
+                  </Grid>
                       <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
                         <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                         <ProgressBar Value="{Binding Percent, Mode=OneWay}" Maximum="100" Height="5" Margin="0,6,0,0"/>
@@ -1603,12 +2153,12 @@ $xaml = @'
         </Grid>
         <Grid Grid.Row="2" Margin="13,4,23,6">
           <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="46"/><ColumnDefinition Width="*"/><ColumnDefinition Width="190"/><ColumnDefinition Width="90"/><ColumnDefinition Width="96"/>
+            <ColumnDefinition Width="34"/><ColumnDefinition Width="50"/><ColumnDefinition Width="*"/><ColumnDefinition Width="190"/><ColumnDefinition Width="90"/><ColumnDefinition Width="96"/>
           </Grid.ColumnDefinitions>
-          <TextBlock Grid.Column="1" Text="PROGRAMA" FontSize="11" FontWeight="SemiBold" Foreground="#5D6478"/>
-          <TextBlock Grid.Column="2" Text="PROPORCIÓN" FontSize="11" FontWeight="SemiBold" Foreground="#5D6478"/>
-          <TextBlock Grid.Column="3" Text="TAMAÑO" FontSize="11" FontWeight="SemiBold" Foreground="#5D6478" HorizontalAlignment="Right"/>
-          <TextBlock Grid.Column="4" Text="INSTALADO" FontSize="11" FontWeight="SemiBold" Foreground="#5D6478" HorizontalAlignment="Right"/>
+          <TextBlock Grid.Column="2" Text="PROGRAMA" FontSize="11" FontWeight="SemiBold" Foreground="#5D6478"/>
+          <TextBlock Grid.Column="3" Text="PROPORCIÓN" FontSize="11" FontWeight="SemiBold" Foreground="#5D6478"/>
+          <TextBlock Grid.Column="4" Text="TAMAÑO" FontSize="11" FontWeight="SemiBold" Foreground="#5D6478" HorizontalAlignment="Right"/>
+          <TextBlock Grid.Column="5" Text="INSTALADO" FontSize="11" FontWeight="SemiBold" Foreground="#5D6478" HorizontalAlignment="Right"/>
         </Grid>
         <Border Grid.Row="3" Style="{StaticResource CardBorder}" Padding="8">
           <ListBox x:Name="ProgramsList" Style="{StaticResource List}">
@@ -1616,18 +2166,30 @@ $xaml = @'
               <DataTemplate>
                 <Grid>
                   <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="46"/><ColumnDefinition Width="*"/><ColumnDefinition Width="190"/><ColumnDefinition Width="90"/><ColumnDefinition Width="96"/>
+                    <ColumnDefinition Width="34"/><ColumnDefinition Width="50"/><ColumnDefinition Width="*"/><ColumnDefinition Width="190"/><ColumnDefinition Width="90"/><ColumnDefinition Width="96"/>
                   </Grid.ColumnDefinitions>
-                  <Border Width="36" Height="36" CornerRadius="10" Background="{StaticResource Accent}" HorizontalAlignment="Left">
-                    <TextBlock Text="{Binding Initial}" Foreground="White" FontWeight="Bold" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                  </Border>
-                  <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
+                  <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="Marcar para desinstalar varios a la vez"/>
+                  <Grid Grid.Column="1" Width="36" Height="36" HorizontalAlignment="Left">
+                    <Border CornerRadius="10" Background="{StaticResource Accent}">
+                      <Border.Style>
+                        <Style TargetType="Border">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding IconPath}" Value="{x:Null}"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </Border.Style>
+                      <TextBlock Text="{Binding Initial}" Foreground="White" FontWeight="Bold" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <Image Source="{Binding IconPath}" Width="32" Height="32" RenderOptions.BitmapScalingMode="HighQuality"/>
+                  </Grid>
+                  <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="0,0,16,0">
                     <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                     <TextBlock Text="{Binding SubLine}" FontSize="11.5" Foreground="#8B92A6" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
                   </StackPanel>
-                  <ProgressBar Grid.Column="2" Value="{Binding Percent, Mode=OneWay}" Maximum="100" VerticalAlignment="Center" Margin="0,0,16,0"/>
-                  <TextBlock Grid.Column="3" Text="{Binding SizeText}" FontSize="13.5" FontWeight="SemiBold" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-                  <TextBlock Grid.Column="4" Text="{Binding InstallDateText}" FontSize="12" Foreground="#8B92A6" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                  <ProgressBar Grid.Column="3" Value="{Binding Percent, Mode=OneWay}" Maximum="100" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                  <TextBlock Grid.Column="4" Text="{Binding SizeText}" FontSize="13.5" FontWeight="SemiBold" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                  <TextBlock Grid.Column="5" Text="{Binding InstallDateText}" FontSize="12" Foreground="#8B92A6" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                 </Grid>
               </DataTemplate>
             </ListBox.ItemTemplate>
@@ -1636,10 +2198,16 @@ $xaml = @'
         <Border Grid.Row="4" Style="{StaticResource CardBorder}" Margin="0,12,0,8" Padding="16,12">
           <Grid>
             <StackPanel VerticalAlignment="Center">
-              <TextBlock x:Name="SelProgName" Text="Selecciona un programa de la lista" FontWeight="SemiBold" FontSize="14" TextTrimming="CharacterEllipsis"/>
-              <TextBlock x:Name="SelProgInfo" Text="La desinstalación a fondo ejecuta el desinstalador oficial y luego borra carpetas, restos, servicios y registro." FontSize="12" Foreground="#8B92A6" TextTrimming="CharacterEllipsis" Margin="0,2,420,0"/>
+              <TextBlock x:Name="SelProgName" Text="Selecciona un programa o marca varias casillas" FontWeight="SemiBold" FontSize="14" TextTrimming="CharacterEllipsis"/>
+              <TextBlock x:Name="SelProgInfo" Text="La desinstalación a fondo ejecuta el desinstalador oficial y luego borra carpetas, restos, servicios y registro." FontSize="12" Foreground="#8B92A6" TextTrimming="CharacterEllipsis" Margin="0,2,600,0"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+              <Button x:Name="BtnClearSel" Style="{StaticResource Btn}" Margin="0,0,10,0" Visibility="Collapsed">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE711;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
+                  <TextBlock Text="Desmarcar"/>
+                </StackPanel>
+              </Button>
               <Button x:Name="BtnOpenProgDir" Style="{StaticResource Btn}" Margin="0,0,10,0" IsEnabled="False">
                 <StackPanel Orientation="Horizontal">
                   <TextBlock Text="&#xE838;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
@@ -1649,7 +2217,7 @@ $xaml = @'
               <Button x:Name="BtnUninstall" Style="{StaticResource BtnDanger}" IsEnabled="False">
                 <StackPanel Orientation="Horizontal">
                   <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
-                  <TextBlock Text="Desinstalar a fondo"/>
+                  <TextBlock x:Name="UninstallLabel" Text="Desinstalar a fondo"/>
                 </StackPanel>
               </Button>
             </StackPanel>
@@ -1708,6 +2276,17 @@ $xaml = @'
             <ProgressBar x:Name="ScanBar" Maximum="100" Height="8" Margin="0,14,0,8"/>
             <TextBlock x:Name="ScanText" FontSize="12" Foreground="#C8CCD8"/>
             <TextBlock x:Name="ScanCurrent" FontSize="11" Foreground="#5D6478" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+          </StackPanel>
+        </Border>
+
+        <Border x:Name="ChartCard" Grid.Row="1" Style="{StaticResource CardBorder}" Margin="0,18,0,0" Padding="20,16" Visibility="Collapsed">
+          <StackPanel>
+            <Grid>
+              <TextBlock x:Name="ChartTitle" Text="Qué ocupa el disco" FontSize="15" FontWeight="Bold"/>
+              <TextBlock x:Name="ChartSub" FontSize="12" Foreground="#8B92A6" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+            </Grid>
+            <Border x:Name="ChartBarHost" Height="14" Margin="0,12,0,12" Background="#242A38"/>
+            <WrapPanel x:Name="ChartLegend"/>
           </StackPanel>
         </Border>
 
@@ -1775,6 +2354,141 @@ $xaml = @'
                 <StackPanel Orientation="Horizontal">
                   <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
                   <TextBlock Text="Eliminar"/>
+                </StackPanel>
+              </Button>
+            </StackPanel>
+          </Grid>
+        </Border>
+      </Grid>
+
+      <!-- ===== DUPLICADOS ===== -->
+      <Grid x:Name="PageDups" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel>
+          <TextBlock Text="Archivos duplicados" Style="{StaticResource H1}"/>
+          <TextBlock Text="Encuentra copias idénticas (mismo contenido, comparado byte a byte) y borra las que sobran. En cada grupo siempre se conserva al menos una copia." Style="{StaticResource Hint}" Margin="0,6,0,0"/>
+        </StackPanel>
+        <Border Grid.Row="1" Style="{StaticResource CardBorder}" Margin="0,18,0,0" Padding="18,14">
+          <Grid>
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+              <TextBlock Text="Buscar en:" Foreground="#8B92A6" VerticalAlignment="Center" Margin="0,0,10,0"/>
+              <ItemsControl x:Name="DupDriveButtons">
+                <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <Button Style="{StaticResource Btn}" Tag="{Binding Root}" Margin="0,0,8,0" Padding="14,8">
+                      <StackPanel Orientation="Horizontal" IsHitTestVisible="False">
+                        <TextBlock Text="&#xEDA2;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
+                        <TextBlock Text="{Binding Name}"/>
+                      </StackPanel>
+                    </Button>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <Button x:Name="BtnDupFolder" Style="{StaticResource Btn}" Padding="14,8">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE8DA;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
+                  <TextBlock Text="Elegir carpeta…"/>
+                </StackPanel>
+              </Button>
+              <TextBlock Text="Tamaño mínimo:" Foreground="#8B92A6" VerticalAlignment="Center" Margin="24,0,8,0"/>
+              <Border Background="#11141B" CornerRadius="9" Padding="3" BorderBrush="#2A3142" BorderThickness="1">
+                <StackPanel Orientation="Horizontal">
+                  <RadioButton x:Name="DupMin1" Style="{StaticResource SortBtn}" Content="1 MB" GroupName="dupmin"/>
+                  <RadioButton x:Name="DupMin10" Style="{StaticResource SortBtn}" Content="10 MB" IsChecked="True" GroupName="dupmin"/>
+                  <RadioButton x:Name="DupMin100" Style="{StaticResource SortBtn}" Content="100 MB" GroupName="dupmin"/>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+            <CheckBox x:Name="DupExclude" IsChecked="True" HorizontalAlignment="Right" VerticalAlignment="Center" Content="Excluir programas y juegos"
+                      ToolTip="Omite Archivos de programa, ProgramData, AppData y bibliotecas de juegos (Steam, Epic, Riot…). Borrar archivos repetidos dentro de un programa puede romperlo."/>
+          </Grid>
+        </Border>
+        <Border x:Name="DupProgress" Grid.Row="2" Style="{StaticResource CardBorder}" Margin="0,14,0,0" Visibility="Collapsed">
+          <StackPanel>
+            <Grid>
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="&#xE895;" FontFamily="Segoe MDL2 Assets" FontSize="16" Foreground="#9C86FF" RenderTransformOrigin="0.5,0.5" VerticalAlignment="Center">
+                  <TextBlock.RenderTransform><RotateTransform/></TextBlock.RenderTransform>
+                  <TextBlock.Triggers>
+                    <EventTrigger RoutedEvent="Loaded">
+                      <BeginStoryboard>
+                        <Storyboard RepeatBehavior="Forever">
+                          <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)" From="0" To="360" Duration="0:0:1.2"/>
+                        </Storyboard>
+                      </BeginStoryboard>
+                    </EventTrigger>
+                  </TextBlock.Triggers>
+                </TextBlock>
+                <TextBlock x:Name="DupTitle" Text="Buscando…" FontWeight="SemiBold" FontSize="14" Margin="12,0,0,0" VerticalAlignment="Center"/>
+              </StackPanel>
+              <Button x:Name="BtnCancelDups" Style="{StaticResource BtnSmall}" Content="Cancelar" HorizontalAlignment="Right"/>
+            </Grid>
+            <ProgressBar x:Name="DupBar" Maximum="100" Height="8" Margin="0,14,0,8"/>
+            <TextBlock x:Name="DupText" FontSize="12" Foreground="#C8CCD8"/>
+          </StackPanel>
+        </Border>
+        <Border Grid.Row="3" Style="{StaticResource CardBorder}" Padding="8" Margin="0,14,0,0">
+          <Grid>
+            <ListBox x:Name="DupList" Style="{StaticResource List}" VirtualizingPanel.IsVirtualizingWhenGrouping="True">
+              <ListBox.GroupStyle>
+                <GroupStyle>
+                  <GroupStyle.HeaderTemplate>
+                    <DataTemplate>
+                      <Border Background="#1B2030" CornerRadius="8" Padding="12,7" Margin="0,10,0,2">
+                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="12.5" Foreground="#B9A8FF" TextTrimming="CharacterEllipsis"/>
+                      </Border>
+                    </DataTemplate>
+                  </GroupStyle.HeaderTemplate>
+                </GroupStyle>
+              </ListBox.GroupStyle>
+              <ListBox.ItemTemplate>
+                <DataTemplate>
+                  <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="34"/><ColumnDefinition Width="34"/><ColumnDefinition Width="*"/><ColumnDefinition Width="130"/><ColumnDefinition Width="90"/></Grid.ColumnDefinitions>
+                    <CheckBox IsChecked="{Binding Checked, Mode=TwoWay}" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="1" Text="&#xE8A5;" FontFamily="Segoe MDL2 Assets" FontSize="17" Foreground="#00C2FF" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="0,0,12,0">
+                      <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                      <TextBlock Text="{Binding Folder}" FontSize="11" Foreground="#8B92A6" TextTrimming="CharacterEllipsis" ToolTip="{Binding FullPath}"/>
+                    </StackPanel>
+                    <TextBlock Grid.Column="3" Text="{Binding ModifiedText}" FontSize="11.5" Foreground="#8B92A6" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                    <TextBlock Grid.Column="4" Text="{Binding SizeText}" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                  </Grid>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+            <StackPanel x:Name="DupEmpty" VerticalAlignment="Center" HorizontalAlignment="Center">
+              <TextBlock Text="&#xE8C8;" FontFamily="Segoe MDL2 Assets" FontSize="46" Foreground="#2E3548" HorizontalAlignment="Center"/>
+              <TextBlock x:Name="DupEmptyText" Text="Elige una unidad o una carpeta para buscar archivos duplicados" Foreground="#5D6478" FontSize="14" Margin="0,14,0,0" HorizontalAlignment="Center"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+        <Border Grid.Row="4" Style="{StaticResource CardBorder}" Margin="0,12,0,8" Padding="16,12">
+          <Grid>
+            <StackPanel VerticalAlignment="Center">
+              <TextBlock x:Name="DupTotal" Text="Sin resultados todavía" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="DupInfo" Text="«Marcar copias sobrantes» deja sin marcar la copia más antigua de cada grupo." FontSize="12" Foreground="#8B92A6" TextTrimming="CharacterEllipsis" Margin="0,0,560,0"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+              <Button x:Name="BtnDupOpen" Style="{StaticResource Btn}" Margin="0,0,10,0">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE838;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
+                  <TextBlock Text="Abrir ubicación"/>
+                </StackPanel>
+              </Button>
+              <Button x:Name="BtnDupAuto" Style="{StaticResource Btn}" Margin="0,0,10,0">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE73A;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
+                  <TextBlock Text="Marcar copias sobrantes"/>
+                </StackPanel>
+              </Button>
+              <Button x:Name="BtnDupDelete" Style="{StaticResource BtnDanger}" IsEnabled="False">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" Margin="0,1,8,0"/>
+                  <TextBlock Text="Eliminar marcados"/>
                 </StackPanel>
               </Button>
             </StackPanel>
@@ -1864,7 +2578,16 @@ $xaml = @'
               <TextBlock x:Name="LeftLoading" Text="Buscando carpetas residuales, accesos directos, servicios y entradas de registro…" FontSize="12" Foreground="#8B92A6" Margin="0,4,0,0"/>
             </StackPanel>
             <Border Grid.Row="3" Background="#11141B" CornerRadius="12" Padding="6" BorderBrush="#232938" BorderThickness="1">
-              <ListBox x:Name="LeftList" Style="{StaticResource List}">
+              <ListBox x:Name="LeftList" Style="{StaticResource List}" VirtualizingPanel.IsVirtualizingWhenGrouping="True">
+                <ListBox.GroupStyle>
+                  <GroupStyle>
+                    <GroupStyle.HeaderTemplate>
+                      <DataTemplate>
+                        <TextBlock Text="{Binding Name}" FontWeight="Bold" FontSize="13" Foreground="#B9A8FF" Margin="10,12,0,4"/>
+                      </DataTemplate>
+                    </GroupStyle.HeaderTemplate>
+                  </GroupStyle>
+                </ListBox.GroupStyle>
                 <ListBox.ItemTemplate>
                   <DataTemplate>
                     <Grid>
@@ -1951,11 +2674,13 @@ $script:ScanTask = $null; $script:SizeTask = $null; $script:LeftTask = $null
 $script:JobTask = $null; $script:MeasureTask = $null; $script:CleanTask = $null; $script:DelTask = $null
 $script:CurNode = $null; $script:ScanRoot = $null; $script:ScanDrive = $null
 $script:CleanLoaded = $false
+$script:FullSeg = @{}
+$script:DupTask = $null; $script:DupDelTask = $null; $script:DupItems = $null; $script:LeftItems = $null
 
 function Set-Status([string]$msg) { $StatusText.Text = $msg }
 
 function Show-Page([string]$name) {
-    foreach ($p in 'PageHome', 'PageProgs', 'PageFolders', 'PageClean') {
+    foreach ($p in 'PageHome', 'PageProgs', 'PageFolders', 'PageDups', 'PageClean') {
         $el = Get-Variable -Name $p -ValueOnly -Scope Script
         if ($p -eq $name) { $el.Visibility = 'Visible' } else { $el.Visibility = 'Collapsed' }
     }
@@ -1965,8 +2690,20 @@ function Show-Page([string]$name) {
 # ---------- Unidades ----------
 function Load-Drives {
     $script:Drives = [DiskPilot.DriveCard]::GetAll()
+    foreach ($d in $script:Drives) {
+        if ($script:FullSeg.ContainsKey($d.Root)) {
+            $d.Segments = $script:FullSeg[$d.Root]
+            $d.ChartNote = 'Desglose completo del último análisis.'
+        }
+        else {
+            $d.Segments = [DiskPilot.Categorizer]::Quick($d, $script:Programs)
+            $d.ChartNote = 'Vista rápida según los programas instalados. Pulsa «Analizar» para el desglose completo.'
+        }
+        [DiskPilot.Categorizer]::SetWidths($d.Segments, 356)
+    }
     $DrivesList.ItemsSource = $null; $DrivesList.ItemsSource = $script:Drives
     $DriveButtons.ItemsSource = $null; $DriveButtons.ItemsSource = $script:Drives
+    $DupDriveButtons.ItemsSource = $null; $DupDriveButtons.ItemsSource = $script:Drives
 }
 
 # ---------- Programas ----------
@@ -1976,6 +2713,7 @@ function Load-Programs {
     $ProgSummary.Text = "{0} programas encontrados · calculando el tamaño real de cada carpeta…" -f $script:Programs.Count
     $HomeProgHint.Text = 'Calculando tamaños reales…'
     $script:SizeTask = [DiskPilot.Programs]::SizeAsync($script:Programs)
+    $script:IconTask = [DiskPilot.Icons]::LoadAsync($script:Programs)
 }
 
 function Update-ProgView {
@@ -2006,6 +2744,7 @@ function Finish-Sizing {
     $TopProgsList.ItemsSource = $top
     $HomeProgHint.Text = "Suman {0} en total. Selecciona uno en «Programas» para desinstalarlo." -f [DiskPilot.Fmt]::Size($total)
     Update-ProgView
+    Load-Drives
 }
 
 # ---------- Escaneo de carpetas ----------
@@ -2014,6 +2753,7 @@ function Start-Scan([string]$root) {
     $NavFolders.IsChecked = $true
     $script:ScanDrive = $script:Drives | Where-Object { $_.Root -eq $root } | Select-Object -First 1
     $ScanPanel.Visibility = 'Visible'; $ScanBar.Value = 0
+    $ChartCard.Visibility = 'Collapsed'
     $ScanTitle.Text = "Analizando $root …"
     $FolderList.ItemsSource = $null; $FolderEmpty.Visibility = 'Collapsed'
     $PathText.Text = $root; $PathInfo.Text = 'Leyendo el sistema de archivos…'
@@ -2054,42 +2794,170 @@ function Update-CleanTotal {
 }
 
 # ---------- Desinstalación ----------
-function Begin-Uninstall {
+function Get-UninstallTargets {
+    $c = @($script:Programs | Where-Object { $_.Selected })
+    if ($c.Count -eq 0 -and $ProgramsList.SelectedItem) { $c = @($ProgramsList.SelectedItem) }
+    return , $c
+}
+
+function Update-ProgSelection {
+    if (-not $script:Programs) { return }
+    $c = @($script:Programs | Where-Object { $_.Selected })
     $p = $ProgramsList.SelectedItem
-    if (-not $p) { Set-Status 'Selecciona primero un programa de la lista.'; return }
+    if ($c.Count -gt 0) {
+        $tot = 0L; foreach ($x in $c) { if ($x.Size -gt 0) { $tot += $x.Size } }
+        $SelProgName.Text = "{0} programa(s) marcados  ·  {1} en total" -f $c.Count, [DiskPilot.Fmt]::Size($tot)
+        $names = ($c | Select-Object -First 5 | ForEach-Object { $_.Name }) -join ',  '
+        if ($c.Count -gt 5) { $names += '…' }
+        $SelProgInfo.Text = $names
+        $UninstallLabel.Text = "Desinstalar {0} a fondo" -f $c.Count
+        $BtnUninstall.IsEnabled = $true
+        $BtnClearSel.Visibility = 'Visible'
+    }
+    else {
+        $UninstallLabel.Text = 'Desinstalar a fondo'
+        $BtnClearSel.Visibility = 'Collapsed'
+        if ($p) {
+            $SelProgName.Text = $p.Name
+            $SelProgInfo.Text = if ($p.InstallDir) { $p.InstallDir } else { 'Ubicación desconocida (se usará el desinstalador oficial y la búsqueda de restos)' }
+            $BtnUninstall.IsEnabled = $true
+        }
+        else {
+            $SelProgName.Text = 'Selecciona un programa o marca varias casillas'
+            $SelProgInfo.Text = 'Marca las casillas para desinstalar varios programas de una vez.'
+            $BtnUninstall.IsEnabled = $false
+        }
+    }
+    $BtnOpenProgDir.IsEnabled = [bool]($p -and $p.InstallDir)
+}
+
+function Begin-Uninstall {
+    $targets = Get-UninstallTargets
+    if ($targets.Count -eq 0) { Set-Status 'Selecciona o marca al menos un programa.'; return }
     if ($script:JobTask -and -not $script:JobTask.IsCompleted) { return }
-    $script:UninstProg = $p
-    $OvTitle.Text = "Desinstalar a fondo: " + $p.Name
-    $sz = if ($p.Size -ge 0) { [DiskPilot.Fmt]::Size($p.Size) } else { 'tamaño desconocido' }
-    $OvSub.Text = "{0}   ·   {1}" -f $(if ($p.Publisher) { $p.Publisher } else { 'Editor desconocido' }), $sz
-    $hasCmd = [bool]($p.UninstallString -or $p.QuietUninstallString)
+    $script:UninstProgs = $targets
+    $tot = 0L; foreach ($x in $targets) { if ($x.Size -gt 0) { $tot += $x.Size } }
+    if ($targets.Count -eq 1) {
+        $p = $targets[0]
+        $OvTitle.Text = "Desinstalar a fondo: " + $p.Name
+        $OvSub.Text = "{0}   ·   {1}" -f $(if ($p.Publisher) { $p.Publisher } else { 'Editor desconocido' }), [DiskPilot.Fmt]::Size($tot)
+    }
+    else {
+        $OvTitle.Text = "Desinstalar a fondo {0} programas" -f $targets.Count
+        $OvSub.Text = "Se desinstalarán uno tras otro   ·   {0} en total" -f [DiskPilot.Fmt]::Size($tot)
+    }
+    $hasCmd = $false
+    foreach ($x in $targets) { if ($x.UninstallString -or $x.QuietUninstallString) { $hasCmd = $true } }
     $OptRunOfficial.IsChecked = $hasCmd; $OptRunOfficial.IsEnabled = $hasCmd
     $OptSilent.IsChecked = $true
-    $LeftList.ItemsSource = $null
+    $LeftList.ItemsSource = $null; $script:LeftItems = $null
     $LeftLoading.Text = 'Buscando carpetas residuales, accesos directos, servicios y entradas de registro…'
     $BtnDoUninstall.IsEnabled = $false
     $ConfirmPanel.Visibility = 'Visible'; $ProgressPanel.Visibility = 'Collapsed'; $Overlay.Visibility = 'Visible'
-    $script:LeftTask = [DiskPilot.Leftovers]::FindAsync($p, $script:Programs)
+    $list = New-Object 'System.Collections.Generic.List[DiskPilot.ProgramInfo]'
+    foreach ($x in $targets) { $list.Add($x) }
+    $script:LeftTask = [DiskPilot.Leftovers]::FindManyAsync($list, $script:Programs)
 }
 
 function Run-Uninstall {
-    $p = $script:UninstProg
-    $job = New-Object DiskPilot.UninstallJob
-    $job.Name = $p.Name
-    if ($OptRunOfficial.IsChecked) {
-        $exe = $null; $arg = $null
-        if ([DiskPilot.Uninstaller]::BuildCommand($p, [bool]$OptSilent.IsChecked, [ref]$exe, [ref]$arg)) { $job.Exe = $exe; $job.Args = $arg }
+    $jobs = New-Object 'System.Collections.Generic.List[DiskPilot.UninstallJob]'
+    $items = @($script:LeftItems)
+    foreach ($p in $script:UninstProgs) {
+        $job = New-Object DiskPilot.UninstallJob
+        $job.Name = $p.Name
+        if ($OptRunOfficial.IsChecked) {
+            $exe = $null; $arg = $null
+            if ([DiskPilot.Uninstaller]::BuildCommand($p, [bool]$OptSilent.IsChecked, [ref]$exe, [ref]$arg)) { $job.Exe = $exe; $job.Args = $arg }
+        }
+        foreach ($i in $items) { if ($i -and $i.Checked -and [object]::ReferenceEquals($i.Owner, $p)) { $job.Items.Add($i) } }
+        if ($job.Exe -or $job.Items.Count -gt 0) { $jobs.Add($job) }
     }
-    $n = 0
-    foreach ($i in @($LeftList.ItemsSource)) { if ($i.Checked) { $job.Items.Add($i); $n++ } }
-    if (-not $job.Exe -and $n -eq 0) { Set-Status 'No hay nada marcado para eliminar.'; return }
+    if ($jobs.Count -eq 0) { Set-Status 'No hay nada marcado para eliminar.'; return }
     $LogBox.Text = ''; $ProgFreed.Text = ''
-    $ProgTitle.Text = "Desinstalando " + $p.Name + "…"
-    $ProgSub.Text = 'No cierres la aplicación. Si aparece la ventana del desinstalador, complétala.'
+    $ProgTitle.Text = if ($jobs.Count -gt 1) { "Desinstalando 1 de {0}…" -f $jobs.Count } else { "Desinstalando " + $jobs[0].Name + "…" }
+    $ProgSub.Text = 'No cierres la aplicación. Si aparece la ventana de algún desinstalador, complétala.'
     $ProgGlyph.Text = [string][char]0xE895
     $BtnCloseOverlay.IsEnabled = $false
     $ConfirmPanel.Visibility = 'Collapsed'; $ProgressPanel.Visibility = 'Visible'
-    $script:JobTask = [DiskPilot.Uninstaller]::RunAsync($job)
+    $script:JobTask = [DiskPilot.Uninstaller]::RunManyAsync($jobs)
+}
+
+# ---------- Gráfica por categorías ----------
+$script:BrushConv = New-Object System.Windows.Media.BrushConverter
+function New-Brush([string]$c) { $script:BrushConv.ConvertFromString($c) }
+
+function Render-Chart($segs, [string]$title, [string]$sub) {
+    $ChartTitle.Text = $title; $ChartSub.Text = $sub
+    $g = New-Object System.Windows.Controls.Grid
+    $ChartLegend.Children.Clear()
+    $i = 0
+    foreach ($s in $segs) {
+        $cd = New-Object System.Windows.Controls.ColumnDefinition
+        $cd.Width = New-Object System.Windows.GridLength([double][Math]::Max(1, $s.Size), ([System.Windows.GridUnitType]::Star))
+        $g.ColumnDefinitions.Add($cd)
+        $b = New-Object System.Windows.Controls.Border
+        $b.Background = New-Brush $s.Color; $b.ToolTip = $s.Tip
+        [System.Windows.Controls.Grid]::SetColumn($b, $i); [void]$g.Children.Add($b); $i++
+
+        $sp = New-Object System.Windows.Controls.StackPanel
+        $sp.Orientation = 'Horizontal'; $sp.Margin = New-Object System.Windows.Thickness(0, 0, 24, 8); $sp.ToolTip = $s.Tip
+        $el = New-Object System.Windows.Shapes.Ellipse
+        $el.Width = 10; $el.Height = 10; $el.Fill = New-Brush $s.Color; $el.VerticalAlignment = 'Center'
+        $t1 = New-Object System.Windows.Controls.TextBlock
+        $t1.Text = $s.Name.ToUpper(); $t1.FontSize = 11.5; $t1.FontWeight = [System.Windows.FontWeights]::SemiBold
+        $t1.Foreground = New-Brush '#AEB4C4'; $t1.Margin = New-Object System.Windows.Thickness(7, 0, 7, 0); $t1.VerticalAlignment = 'Center'
+        $t2 = New-Object System.Windows.Controls.TextBlock
+        $t2.Text = $s.SizeText; $t2.FontSize = 13; $t2.FontWeight = [System.Windows.FontWeights]::Bold
+        $t2.Foreground = New-Brush '#FFFFFF'; $t2.VerticalAlignment = 'Center'
+        $t3 = New-Object System.Windows.Controls.TextBlock
+        $t3.Text = "  {0:0.#}%" -f $s.Percent; $t3.FontSize = 11.5; $t3.Foreground = New-Brush '#6B7286'; $t3.VerticalAlignment = 'Center'
+        [void]$sp.Children.Add($el); [void]$sp.Children.Add($t1); [void]$sp.Children.Add($t2); [void]$sp.Children.Add($t3)
+        [void]$ChartLegend.Children.Add($sp)
+    }
+    $ChartBarHost.Child = $g
+    $ChartCard.Visibility = 'Visible'
+}
+
+# ---------- Duplicados ----------
+function Start-Dups([string[]]$roots) {
+    if ($script:DupTask) { Set-Status 'Ya hay una búsqueda de duplicados en curso.'; return }
+    $min = if ($DupMin1.IsChecked) { 1MB } elseif ($DupMin100.IsChecked) { 100MB } else { 10MB }
+    $DupList.ItemsSource = $null; $script:DupItems = $null
+    $DupEmpty.Visibility = 'Collapsed'; $DupProgress.Visibility = 'Visible'; $DupBar.Value = 0
+    $DupTitle.Text = "Buscando duplicados en " + ($roots -join ', ') + " …"
+    $DupTotal.Text = 'Buscando…'; $BtnDupDelete.IsEnabled = $false
+    $script:DupStart = Get-Date
+    $script:DupTask = [DiskPilot.DupFinder]::FindAsync([string[]]$roots, [long]$min, [bool]$DupExclude.IsChecked)
+}
+
+function Show-Dups($items) {
+    $script:DupItems = $items
+    if (-not $items -or $items.Count -eq 0) {
+        $DupList.ItemsSource = $null
+        $DupEmptyText.Text = 'No se encontraron archivos duplicados con esos criterios.'
+        $DupEmpty.Visibility = 'Visible'
+        $DupTotal.Text = 'Sin duplicados'; $DupInfo.Text = ''
+        $BtnDupDelete.IsEnabled = $false
+        return
+    }
+    $view = [System.Windows.Data.CollectionViewSource]::GetDefaultView($items)
+    $view.GroupDescriptions.Clear()
+    $view.GroupDescriptions.Add((New-Object System.Windows.Data.PropertyGroupDescription 'Group'))
+    $DupList.ItemsSource = $view
+    $DupEmpty.Visibility = 'Collapsed'
+    Update-DupTotal
+}
+
+function Update-DupTotal {
+    if (-not $script:DupItems) { return }
+    $groups = @{}; $waste = 0L; $sel = 0L; $n = 0
+    foreach ($d in $script:DupItems) {
+        if ($groups.ContainsKey($d.GroupId)) { $waste += $d.Size } else { $groups[$d.GroupId] = 1 }
+        if ($d.Checked) { $sel += $d.Size; $n++ }
+    }
+    $DupTotal.Text = "{0} grupos de duplicados  ·  {1} recuperables" -f $groups.Count, [DiskPilot.Fmt]::Size($waste)
+    $DupInfo.Text = if ($n -gt 0) { "{0} archivos marcados para borrar  ·  {1}" -f $n, [DiskPilot.Fmt]::Size($sel) } else { '«Marcar copias sobrantes» deja sin marcar la copia más antigua de cada grupo.' }
+    $BtnDupDelete.IsEnabled = $n -gt 0
 }
 
 function Flush-Log {
@@ -2116,6 +2984,12 @@ $timer.Add_Tick({
                     Show-Node $t.Result
                     $TopFilesList.ItemsSource = [DiskPilot.Scanner]::TopFiles(40)
                     $HomeFilesHint.Text = "Archivos de más de 200 MB en {0}. Doble clic abre su ubicación." -f $t.Result.Path
+                    if ($script:ScanDrive) {
+                        $segs = [DiskPilot.Categorizer]::Classify($t.Result, $script:ScanDrive.Total, $script:ScanDrive.Free, $script:Programs)
+                        $script:FullSeg[$script:ScanDrive.Root] = $segs
+                        Render-Chart $segs ("Qué ocupa " + $script:ScanDrive.Name) ("{0} usados de {1}" -f [DiskPilot.Fmt]::Size($script:ScanDrive.Used), [DiskPilot.Fmt]::Size($script:ScanDrive.Total))
+                        Load-Drives
+                    }
                     $secs = [int]((Get-Date) - $script:ScanStart).TotalSeconds
                     if ([DiskPilot.Scanner]::Cancel) { Set-Status 'Análisis cancelado: los datos mostrados están incompletos.' }
                     else { Set-Status ("Análisis completado en {0} s · {1:N0} archivos revisados." -f $secs, [DiskPilot.Scanner]::FilesScanned) }
@@ -2142,7 +3016,11 @@ $timer.Add_Tick({
             $t = $script:LeftTask; $script:LeftTask = $null
             if ($t.IsFaulted) { $LeftLoading.Text = 'Error buscando restos: ' + $t.Exception.InnerException.Message }
             else {
-                $LeftList.ItemsSource = $t.Result
+                $script:LeftItems = $t.Result
+                $lv = [System.Windows.Data.CollectionViewSource]::GetDefaultView($t.Result)
+                $lv.GroupDescriptions.Clear()
+                $lv.GroupDescriptions.Add((New-Object System.Windows.Data.PropertyGroupDescription 'Group'))
+                $LeftList.ItemsSource = $lv
                 $LeftLoading.Text = "{0} elementos encontrados. Desmarca lo que quieras conservar." -f $t.Result.Count
             }
             $BtnDoUninstall.IsEnabled = $true
@@ -2151,6 +3029,9 @@ $timer.Add_Tick({
         # Trabajo de desinstalación
         if ($script:JobTask) {
             Flush-Log
+            if (-not $script:JobTask.IsCompleted -and [DiskPilot.Uninstaller]::Total -gt 1) {
+                $ProgTitle.Text = "Desinstalando {0} de {1}…" -f [DiskPilot.Uninstaller]::Current, [DiskPilot.Uninstaller]::Total
+            }
             if ($script:JobTask.IsCompleted) {
                 $script:JobTask = $null
                 Flush-Log
@@ -2160,6 +3041,38 @@ $timer.Add_Tick({
                 $ProgFreed.Text = "Espacio liberado: " + [DiskPilot.Fmt]::Size([DiskPilot.Uninstaller]::Freed)
                 $BtnCloseOverlay.IsEnabled = $true
             }
+        }
+
+        # Duplicados
+        if ($script:DupTask) {
+            $t = $script:DupTask
+            if ($t.IsCompleted) {
+                $script:DupTask = $null
+                $DupProgress.Visibility = 'Collapsed'
+                if ($t.IsFaulted) { Set-Status ('Error buscando duplicados: ' + $t.Exception.InnerException.Message) }
+                else {
+                    Show-Dups $t.Result
+                    $secs = [int]((Get-Date) - $script:DupStart).TotalSeconds
+                    Set-Status ("Búsqueda de duplicados terminada en {0} s · {1:N0} archivos revisados." -f $secs, [DiskPilot.DupFinder]::Found)
+                }
+            }
+            else {
+                $tot = [DiskPilot.DupFinder]::HashTotal
+                if ($tot -gt 0) { $DupBar.Value = [Math]::Min(99.0, [DiskPilot.DupFinder]::HashDone * 100.0 / $tot) }
+                $DupText.Text = "{0}…   ·   {1:N0} archivos revisados   ·   {2:N0} candidatos   ·   {3} de {4} comparados" -f [DiskPilot.DupFinder]::Stage, [DiskPilot.DupFinder]::Found, [DiskPilot.DupFinder]::Candidates, [DiskPilot.Fmt]::Size([DiskPilot.DupFinder]::HashDone), [DiskPilot.Fmt]::Size($tot)
+            }
+        }
+        if ($script:DupDelTask -and $script:DupDelTask.IsCompleted) {
+            $t = $script:DupDelTask; $script:DupDelTask = $null
+            $freed = if ($t.IsFaulted) { 0 } else { $t.Result }
+            $left = @($script:DupItems | Where-Object { [IO.File]::Exists($_.FullPath) })
+            $cnt = @{}; foreach ($d in $left) { $cnt[$d.GroupId] = 1 + [int]$cnt[$d.GroupId] }
+            $keep = New-Object 'System.Collections.Generic.List[DiskPilot.DupFile]'
+            foreach ($d in $left) { if ($cnt[$d.GroupId] -gt 1) { $d.Checked = $false; $keep.Add($d) } }
+            Show-Dups $keep
+            $BtnDupAuto.IsEnabled = $true
+            Set-Status ("Duplicados eliminados: {0} liberados." -f [DiskPilot.Fmt]::Size($freed))
+            Load-Drives
         }
 
         # Limpieza: medición
@@ -2195,6 +3108,62 @@ $NavHome.Add_Checked({ Show-Page 'PageHome' })
 $NavProgs.Add_Checked({ Show-Page 'PageProgs' })
 $NavFolders.Add_Checked({ Show-Page 'PageFolders' })
 $NavClean.Add_Checked({ Show-Page 'PageClean' })
+$NavDups.Add_Checked({ Show-Page 'PageDups' })
+
+$dupDriveClick = [System.Windows.RoutedEventHandler] {
+    param($s, $e)
+    $b = $e.OriginalSource
+    if ($b -is [System.Windows.Controls.Button] -and $b.Tag) { Start-Dups @([string]$b.Tag) }
+}
+$DupDriveButtons.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $dupDriveClick)
+$BtnDupFolder.Add_Click({
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = 'Elige la carpeta donde buscar archivos duplicados'
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Start-Dups @($dlg.SelectedPath) }
+})
+$BtnCancelDups.Add_Click({ [DiskPilot.DupFinder]::Cancel = $true })
+$DupList.AddHandler([System.Windows.Controls.Primitives.ToggleButton]::CheckedEvent, [System.Windows.RoutedEventHandler] { Update-DupTotal })
+$DupList.AddHandler([System.Windows.Controls.Primitives.ToggleButton]::UncheckedEvent, [System.Windows.RoutedEventHandler] { Update-DupTotal })
+$BtnDupAuto.Add_Click({
+    if (-not $script:DupItems) { return }
+    $seen = @{}
+    foreach ($d in $script:DupItems) {
+        # Se conserva la primera copia de cada grupo (la más antigua)
+        if ($seen.ContainsKey($d.GroupId)) { $d.Checked = $true } else { $seen[$d.GroupId] = 1; $d.Checked = $false }
+    }
+    Update-DupTotal
+})
+$BtnDupOpen.Add_Click({ $d = $DupList.SelectedItem; if ($d) { Start-Process explorer.exe "/select,`"$($d.FullPath)`"" } })
+$DupList.Add_MouseDoubleClick({ $d = $DupList.SelectedItem; if ($d) { Start-Process explorer.exe "/select,`"$($d.FullPath)`"" } })
+$BtnDupDelete.Add_Click({
+    if (-not $script:DupItems) { return }
+    $sel = @($script:DupItems | Where-Object { $_.Checked })
+    if ($sel.Count -eq 0) { return }
+    $kept = @{}
+    foreach ($d in $script:DupItems) { if (-not $d.Checked) { $kept[$d.GroupId] = 1 } }
+    foreach ($d in $sel) {
+        if (-not $kept.ContainsKey($d.GroupId)) {
+            [System.Windows.MessageBox]::Show("Has marcado TODAS las copias de «$($d.Name)».`n`nDeja al menos una sin marcar en cada grupo.", 'Falta conservar una copia', 'OK', 'Warning') | Out-Null
+            return
+        }
+    }
+    $tot = 0L; foreach ($d in $sel) { $tot += $d.Size }
+    $r = [System.Windows.MessageBox]::Show(("Se borrarán definitivamente {0} archivos duplicados ({1}).`n`nEn cada grupo se conserva al menos una copia.`n`n¿Continuar?" -f $sel.Count, [DiskPilot.Fmt]::Size($tot)), 'Eliminar duplicados', 'YesNo', 'Warning')
+    if ($r -ne 'Yes') { return }
+    $paths = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($d in $sel) { $paths.Add($d.FullPath) }
+    $BtnDupDelete.IsEnabled = $false; $BtnDupAuto.IsEnabled = $false
+    Set-Status ("Eliminando {0} duplicados…" -f $sel.Count)
+    $script:DupDelTask = [DiskPilot.Cleaner]::DeleteFilesAsync($paths)
+})
+
+$ProgramsList.AddHandler([System.Windows.Controls.Primitives.ToggleButton]::CheckedEvent, [System.Windows.RoutedEventHandler] { Update-ProgSelection })
+$ProgramsList.AddHandler([System.Windows.Controls.Primitives.ToggleButton]::UncheckedEvent, [System.Windows.RoutedEventHandler] { Update-ProgSelection })
+$BtnClearSel.Add_Click({ foreach ($p in $script:Programs) { $p.Selected = $false }; Update-ProgSelection })
+$ChartBarHost.Add_SizeChanged({
+    $r = New-Object System.Windows.Rect(0, 0, $ChartBarHost.ActualWidth, $ChartBarHost.ActualHeight)
+    $ChartBarHost.Clip = New-Object System.Windows.Media.RectangleGeometry($r, 7, 7)
+})
 $BtnGoProgs.Add_Click({ $NavProgs.IsChecked = $true })
 
 $driveClick = [System.Windows.RoutedEventHandler] {
@@ -2247,30 +3216,22 @@ $SortSize.Add_Checked({ $script:SortMode = 'size'; Update-ProgView })
 $SortName.Add_Checked({ $script:SortMode = 'name'; Update-ProgView })
 $SortDate.Add_Checked({ $script:SortMode = 'date'; Update-ProgView })
 $BtnRefreshProgs.Add_Click({ if (-not $script:SizeTask) { Load-Programs } })
-$ProgramsList.Add_SelectionChanged({
-    $p = $ProgramsList.SelectedItem
-    if ($p) {
-        $SelProgName.Text = $p.Name
-        $SelProgInfo.Text = if ($p.InstallDir) { $p.InstallDir } else { 'Ubicación desconocida (se usará el desinstalador oficial y la búsqueda de restos)' }
-        $BtnUninstall.IsEnabled = $true
-        $BtnOpenProgDir.IsEnabled = [bool]$p.InstallDir
-    }
-    else { $BtnUninstall.IsEnabled = $false; $BtnOpenProgDir.IsEnabled = $false }
-})
-$ProgramsList.Add_MouseDoubleClick({ Begin-Uninstall })
+$ProgramsList.Add_SelectionChanged({ Update-ProgSelection })
 $BtnOpenProgDir.Add_Click({ $p = $ProgramsList.SelectedItem; if ($p -and $p.InstallDir) { Start-Process explorer.exe "`"$($p.InstallDir)`"" } })
 $BtnUninstall.Add_Click({ Begin-Uninstall })
 $BtnCancelUninstall.Add_Click({ $Overlay.Visibility = 'Collapsed' })
 $BtnDoUninstall.Add_Click({ Run-Uninstall })
 $BtnCloseOverlay.Add_Click({
     $Overlay.Visibility = 'Collapsed'
-    $p = $script:UninstProg
-    if ($p -and -not [DiskPilot.Programs]::StillInstalled($p)) {
-        [void]$script:Programs.Remove($p)
-        Finish-Sizing
+    $names = @()
+    foreach ($p in @($script:UninstProgs)) {
+        $names += $p.Name
+        $p.Selected = $false
+        if (-not [DiskPilot.Programs]::StillInstalled($p)) { [void]$script:Programs.Remove($p) }
     }
-    Load-Drives
-    Set-Status ("Desinstalación de {0} finalizada." -f $p.Name)
+    Finish-Sizing
+    Update-ProgSelection
+    Set-Status ("Desinstalación finalizada: {0}" -f ($names -join ', '))
 })
 
 $CleanList.AddHandler([System.Windows.Controls.Primitives.ToggleButton]::CheckedEvent, [System.Windows.RoutedEventHandler] { Update-CleanTotal })
@@ -2294,7 +3255,7 @@ $window.Add_SourceInitialized({
 $window.Add_Closing({ [DiskPilot.Scanner]::Cancel = $true; $timer.Stop() })
 
 # ---------- Arranque ----------
-$VersionText.Text = "Control de almacenamiento · v$AppVersion"
+$VersionText.Text = "Versión $AppVersion"
 $window.Title = "DiskPilot v$AppVersion — Almacenamiento y desinstalación a fondo"
 if (-not $IsAdmin) {
     $AdminGlyph.Text = [string][char]0xE7BA; $AdminGlyph.Foreground = '#FFB547'
@@ -2320,7 +3281,7 @@ if ($SelfTest) {
 
 if ($Screenshot) {
     $script:shotTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:shotTimer.Interval = [TimeSpan]::FromSeconds(6)
+    $script:shotTimer.Interval = [TimeSpan]::FromSeconds(9)
     $script:shotPage = 0
     $script:shotTimer.Add_Tick({
         $page = @('Home', 'Progs')[$script:shotPage]
@@ -2331,7 +3292,7 @@ if ($Screenshot) {
         $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
         $fs = [IO.File]::Create(($Screenshot -replace '\.png$', "-$page.png")); $enc.Save($fs); $fs.Close()
         $script:shotPage++
-        if ($script:shotPage -eq 1) { $NavProgs.IsChecked = $true; $ProgramsList.SelectedIndex = 0 }
+        if ($script:shotPage -eq 1) { $NavProgs.IsChecked = $true; $ProgramsList.SelectedIndex = 0; $ProgramsList.Items[1].Selected = $true; $ProgramsList.Items[2].Selected = $true; Update-ProgSelection }
         else { $window.Close() }
     })
     $script:shotTimer.Start()

@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0] - 2026-11-08
+
+### Añadido
+- Gráfica de uso por categorías (estilo Steam) en cada unidad: vista rápida al abrir y desglose completo tras «Analizar».
+- Icono real de cada programa en las listas.
+- Desinstalación múltiple: marca varios programas y se desinstalan uno tras otro, con la lista de restos agrupada por programa.
+- Nueva sección «Duplicados»: búsqueda por contenido, agrupación, marcado automático de copias sobrantes y borrado seguro.
+
+### Cambiado
+- Las carpetas compartidas solo entre programas del mismo lote ya no se desmarcan (p. ej. Steam junto con sus juegos).
+- Se quitó el doble clic para desinstalar, para evitar aperturas accidentales al marcar casillas.
+
 ## [1.1.0] - 2026-11-08
 
 ### Añadido

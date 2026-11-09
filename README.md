@@ -2,7 +2,7 @@
 
 Analizador de almacenamiento y desinstalador a fondo para Windows 10/11, con interfaz moderna en modo oscuro.
 
-**Versión actual:** 1.1.0
+**Versión actual:** 1.2.0
 
 ## ⬇️ Descargar
 
@@ -12,8 +12,8 @@ Analizador de almacenamiento y desinstalador a fondo para Windows 10/11, con int
 
 ## Funciones
 
-- **Resumen** — uso de cada unidad, programas que más ocupan y archivos más grandes (+200 MB).
-- **Programas** — todos los programas instalados ordenados por el tamaño real de su carpeta, con búsqueda y orden por nombre o fecha.
+- **Resumen** — gráfica por categorías de cada unidad (Juegos, Programas, Sistema, Datos de apps, Archivos personales, Temporales, Otros, Libre), programas que más ocupan y archivos más grandes (+200 MB).
+- **Programas** — todos los programas instalados con su icono, ordenados por el tamaño real de su carpeta, con búsqueda y orden por nombre o fecha. Marca varias casillas para desinstalarlos de una vez.
 - **Desinstalar a fondo** (con permisos de administrador):
   1. Ejecuta el desinstalador oficial (en modo silencioso cuando el programa lo admite: MSI, Inno Setup, NSIS, Squirrel).
   2. Cierra los procesos del programa y detiene/elimina sus servicios de Windows.
@@ -21,7 +21,8 @@ Analizador de almacenamiento y desinstalador a fondo para Windows 10/11, con int
   4. Si algo está bloqueado, toma la propiedad (`takeown` / `icacls`) y lo programa para borrarse al reiniciar.
 
   Antes de borrar muestra la lista completa de elementos para desmarcar lo que se quiera conservar.
-- **Explorar disco** — escaneo rápido de una unidad completa (API Win32), navegación por carpetas de mayor a menor, abrir en el Explorador o eliminar.
+- **Explorar disco** — gráfica completa por categorías tras el análisis, escaneo rápido de una unidad completa (API Win32), navegación por carpetas de mayor a menor, abrir en el Explorador o eliminar.
+- **Duplicados** — busca archivos idénticos (tamaño → hash parcial → hash MD5 completo) en una unidad o carpeta, agrupa las copias y marca automáticamente las sobrantes conservando la más antigua. Nunca deja borrar todas las copias de un grupo.
 - **Limpieza rápida** — temporales, papelera, caché de Windows Update y Optimización de distribución, informes de errores, volcados de memoria, caché de Chrome/Edge, Windows.old e hibernación.
 
 ## Protecciones
