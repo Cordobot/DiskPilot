@@ -1,5 +1,5 @@
 ﻿# =====================================================================
-#  DiskPilot v1.3.0 - Analizador de disco y desinstalador a fondo para Windows
+#  DiskPilot v1.4.0 - Analizador de disco y desinstalador a fondo para Windows
 #  Requiere: Windows 10/11 con PowerShell 5.1 (incluido en Windows)
 # =====================================================================
 param(
@@ -9,7 +9,7 @@ param(
     [string]$TestCategory
 )
 $ErrorActionPreference = 'Continue'
-$AppVersion = '1.3.0'
+$AppVersion = '1.4.0'
 
 # ---------- Elevación a administrador ----------
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -740,6 +740,7 @@ namespace DiskPilot
                                 if (s == null) continue;
                                 string dn = S(s, "DisplayName");
                                 if (dn == null) continue;
+                                if (dn == "DiskPilot" && S(s, "Publisher") == "Cordobot") continue; // no listarse a sí mismo
                                 if (I(s, "SystemComponent") == 1) continue;
                                 if (S(s, "ParentKeyName") != null) continue;
                                 string rt = S(s, "ReleaseType");

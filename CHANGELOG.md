@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.0] - 2026-11-08
+
+### Añadido
+- El `.exe` funciona como instalador/actualizador: cierra la versión anterior abierta, se instala en `%LOCALAPPDATA%\Programs\DiskPilot` sustituyéndola y borra los archivos de versiones antiguas (scripts extraídos y `DiskPilot*.exe` viejos en Descargas/Escritorio).
+- Accesos directos en el menú Inicio y el Escritorio.
+- Registro en «Aplicaciones instaladas» de Windows y desinstalación con `--uninstall`.
+- Si se abre la misma versión dos veces, se trae al frente la ventana ya abierta.
+
+### Cambiado
+- DiskPilot ya no aparece en su propia lista de programas.
+
 ## [1.3.0] - 2026-11-08
 
 ### Añadido

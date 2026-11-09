@@ -2,7 +2,7 @@
 
 Analizador de almacenamiento y desinstalador a fondo para Windows 10/11, con interfaz moderna en modo oscuro.
 
-**Versión actual:** 1.3.0
+**Versión actual:** 1.4.0
 
 ## ⬇️ Descargar
 

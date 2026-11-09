@@ -55,7 +55,7 @@ $src = Join-Path $obj 'Launcher.cs'
 (Get-Content (Join-Path $here 'Launcher.cs') -Raw -Encoding UTF8).Replace('__VERSION__', $version) | Set-Content $src -Encoding UTF8
 $out = Join-Path $dist 'DiskPilot.exe'
 & $csc /nologo /target:winexe /optimize+ /platform:anycpu "/out:$out" "/win32icon:$ico" "/win32manifest:$(Join-Path $here 'app.manifest')" `
-    /reference:System.Windows.Forms.dll "/resource:$script,DiskPilot.ps1" $src
+    /reference:System.Windows.Forms.dll /reference:System.Management.dll "/resource:$script,DiskPilot.ps1" $src
 if ($LASTEXITCODE -ne 0) { throw "Falló la compilación ($LASTEXITCODE)" }
 Copy-Item $ico (Join-Path $dist 'DiskPilot.ico') -Force
 Write-Host "Generado: $out ($([Math]::Round((Get-Item $out).Length / 1KB)) KB)"
